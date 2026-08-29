@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#171713" />
+    <meta name="description" content="Preview a GLB in 3D and AR, or create a shareable AR link from a publicly hosted model." />
+    <meta property="og:title" content="Spatial Drop — Put your model in the room" />
+    <meta property="og:description" content="One GLB. One QR. No app." />
+    <meta property="og:image" content="./og.png" />
+    <title>Spatial Drop — GitHub Pages Preview</title>
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <a class="brand" href="./"><b>S/</b><span>SPATIAL DROP</span></a>
+        <span class="pill">GITHUB PAGES PREVIEW</span>
+      </header>
+
+      <section class="intro">
+        <p class="eyebrow">3D → URL → REAL SPACE</p>
+        <h1>Put your model<br />in the room.</h1>
+        <p class="lede">Preview a GLB immediately—or point to a hosted model and create a QR-powered AR page.</p>
+      </section>
+
+      <section class="workspace">
+        <div class="controls">
+          <div class="step"><em>01</em><div><h2>Choose a model</h2><p>Binary glTF · 15 MB maximum</p></div></div>
+
+          <div id="drop-zone" class="drop-zone" role="button" tabindex="0">
+            <input id="file-input" type="file" accept=".glb,model/gltf-binary" hidden />
+            <span class="upload-mark">↗</span>
+            <div><strong id="drop-title">Drop a GLB here</strong><small id="drop-detail">or click to choose a file</small></div>
+          </div>
+
+          <div class="or"><span>OR</span></div>
+
+          <label class="field">
+            <span>Public GLB URL</span>
+            <input id="model-url" type="url" inputmode="url" placeholder="https://example.com/model.glb" />
+            <small>Required for a QR link that works on another device.</small>
+          </label>
+
+          <label class="field">
+            <span>Display name</span>
+            <input id="model-title" type="text" maxlength="80" placeholder="Eames lounge chair" />
+          </label>
+
+          <fieldset>
+            <legend>Placement surface</legend>
+            <div class="segments">
+              <button class="active" type="button" data-placement="floor">Floor</button>
+              <button type="button" data-placement="wall">Wall</button>
+            </div>
+          </fieldset>
+
+          <label class="toggle">
+            <span><strong>Allow pinch to resize</strong><small>Otherwise the GLB’s meter scale stays fixed.</small></span>
+            <input id="resizable" type="checkbox" checked />
+          </label>
+
+          <p id="error" class="error" role="alert" hidden></p>
+          <button id="share-button" class="primary" type="button" disabled><span>Create share link</span><span>→</span></button>
+          <p class="storage-note"><b>Pages mode:</b> local files stay on this device. Runtime uploads need a storage backend.</p>
+        </div>
+
+        <div class="preview">
+          <div class="preview-top"><span>LIVE PREVIEW</span><span id="status">WAITING FOR MODEL</span></div>
+          <div class="stage">
+            <model-viewer id="viewer" ar ar-modes="webxr scene-viewer quick-look" camera-controls auto-rotate autoplay shadow-intensity="0.8" environment-image="neutral" touch-action="pan-y">
+              <button slot="ar-button" class="ar-button">✦&nbsp;&nbsp;View in your space</button>
+            </model-viewer>
+            <div id="empty" class="empty"><div class="cube"></div><p>Your model will appear here</p></div>
+          </div>
+          <div class="preview-bottom"><span>Drag to orbit</span><span>Scroll to zoom</span><span>AR on supported phones</span></div>
+        </div>
+      </section>
+
+      <section id="share-panel" class="share-panel" hidden>
+        <div><p class="eyebrow">SHARE LINK READY</p><h2>Scan to put it<br />in the room.</h2><p id="share-url"></p><div class="actions"><button id="copy-button" type="button">Copy link</button><a id="open-link" href="#">Open AR page ↗</a></div></div>
+        <div class="qr"><canvas id="qr-canvas"></canvas><strong>SCAN TO PLACE</strong></div>
+      </section>
+
+      <footer><span>SPATIAL DROP / STATIC PREVIEW</span><span>GLB · QUICK LOOK · SCENE VIEWER · WEBXR</span></footer>
+    </main>
+    <script type="module" src="/app.ts"></script>
+  </body>
+</html>
