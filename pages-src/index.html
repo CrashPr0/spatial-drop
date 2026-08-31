@@ -164,6 +164,13 @@
 
         <section class="receive-workbench">
           <article class="scanner-card">
+            <div class="receiver-transport-switch" aria-label="Receiver transport">
+              <span>SCANNER TYPE</span>
+              <div>
+                <button type="button" data-receive-transport="mono" aria-pressed="false">Fountain QR</button>
+                <button type="button" data-receive-transport="cimbar" aria-pressed="false">Cimbar Bu</button>
+              </div>
+            </div>
             <div class="scanner-viewport">
               <video id="beam-video" playsinline muted aria-label="QR Beam camera preview"></video>
               <canvas id="beam-scan-canvas" hidden></canvas>

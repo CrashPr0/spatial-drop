@@ -305,6 +305,7 @@ export function setupBeamLab() {
   const scannerStopButton = document.querySelector<HTMLButtonElement>("#scanner-stop-button")!;
   const scannerError = document.querySelector<HTMLElement>("#scanner-error")!;
   const cimbarReceiverFrame = document.querySelector<HTMLIFrameElement>("#cimbar-receiver-frame")!;
+  const receiverTransportButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-receive-transport]"));
   const receiveTitle = document.querySelector<HTMLElement>("#receive-title")!;
   const receivePercentage = document.querySelector<HTMLElement>("#receive-percentage")!;
   const receiveProgressBar = document.querySelector<HTMLElement>("#receive-progress-bar")!;
@@ -317,15 +318,33 @@ export function setupBeamLab() {
   const receivedViewer = document.querySelector<HTMLElement>("#received-viewer")!;
   let receiveBuffer: ReceiveBuffer | null = null;
   let lastScanAt = 0;
-  const receiveTransport: BeamTransport = new URL(window.location.href).searchParams.get("beam") === "cimbar" ? "cimbar" : "mono";
+  let receiveTransport: BeamTransport = new URL(window.location.href).searchParams.get("beam") === "cimbar" ? "cimbar" : "mono";
 
-  if (receiveTransport === "cimbar") {
-    receiveTransportBadge.textContent = "CIMBAR Bu · 5 FPS";
-    receiveTransportBadge.classList.add("cimbar");
-    scannerStartButton.querySelector("span")!.textContent = "Start Cimbar receiver";
-    receiveDetail.textContent = "Cimbar receiver armed. It accepts fountain frames in any order and corrects damaged symbols.";
-  } else {
-    receiveTransportBadge.textContent = "FOUNTAIN QR";
+  function resetReceiveProgress() {
+    receiveBuffer = null;
+    receiveTitle.textContent = "Waiting for beam";
+    receivePercentage.textContent = "0%";
+    receiveProgressBar.style.width = "0%";
+    receiveFrames.textContent = "0 / —";
+    receiveBytes.textContent = "0 KB";
+    receiveVerify.textContent = "Waiting";
+  }
+
+  function updateReceiveTransportUi(updateUrl = false) {
+    const isCimbar = receiveTransport === "cimbar";
+    receiverTransportButtons.forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.receiveTransport === receiveTransport)));
+    receiveTransportBadge.textContent = isCimbar ? "CIMBAR Bu · 5 FPS" : "FOUNTAIN QR";
+    receiveTransportBadge.classList.toggle("cimbar", isCimbar);
+    scannerStartButton.querySelector("span")!.textContent = isCimbar ? "Start Cimbar receiver" : "Start Fountain QR scanner";
+    receiveDetail.textContent = isCimbar
+      ? "Cimbar receiver armed. It accepts fountain frames in any order and corrects damaged symbols."
+      : "Open QR Beam on another screen, choose a compact GLB, and start transmitting.";
+    if (updateUrl) {
+      const url = new URL(window.location.href);
+      if (isCimbar) url.searchParams.set("beam", "cimbar");
+      else url.searchParams.delete("beam");
+      window.history.replaceState(null, "", url);
+    }
   }
 
   function initializeBuffer(frame: ParsedBeamFrame) {
@@ -439,6 +458,14 @@ export function setupBeamLab() {
     else void startQrScanner();
   });
   scannerStopButton.addEventListener("click", stopBeamScanner);
+  receiverTransportButtons.forEach((button) => button.addEventListener("click", () => {
+    const nextTransport: BeamTransport = button.dataset.receiveTransport === "cimbar" ? "cimbar" : "mono";
+    if (nextTransport === receiveTransport) return;
+    stopBeamScanner();
+    receiveTransport = nextTransport;
+    resetReceiveProgress();
+    updateReceiveTransportUi(true);
+  }));
 
   window.addEventListener("message", (event) => {
     if (event.origin !== window.location.origin || !event.data) return;
@@ -488,4 +515,5 @@ export function setupBeamLab() {
   });
 
   updateTransportUi();
+  updateReceiveTransportUi();
 }

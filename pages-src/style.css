@@ -299,6 +299,11 @@ footer a { color: inherit; text-underline-offset: 3px; }
 .receive-intro { padding-bottom: clamp(42px, 5vw, 68px); }
 .receive-workbench { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(340px, .85fr); min-height: 680px; background: white; border-top: 7px solid var(--sjsu-blue); box-shadow: 0 22px 70px rgba(19, 55, 97, .12); }
 .scanner-card { display: flex; flex-direction: column; padding: clamp(20px, 3vw, 38px); background: var(--spartan-navy); color: white; }
+.receiver-transport-switch { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+.receiver-transport-switch > span { color: #9db8d0; font: 800 8px/1 monospace; letter-spacing: .12em; }
+.receiver-transport-switch > div { display: flex; padding: 3px; border: 1px solid rgba(255, 255, 255, .35); }
+.receiver-transport-switch button { border: 0; background: transparent; color: white; padding: 9px 11px; font: 800 8px/1 monospace; letter-spacing: .05em; cursor: pointer; }
+.receiver-transport-switch button[aria-pressed="true"] { background: var(--sjsu-gold); color: var(--spartan-navy); }
 .scanner-viewport { position: relative; flex: none; width: 100%; min-height: 0; aspect-ratio: 1; overflow: hidden; background-color: #091f38; background-image: radial-gradient(circle at center, rgba(0, 85, 162, .7), transparent 68%); }
 .scanner-viewport video { width: 100%; height: 100%; object-fit: cover; object-position: center; display: block; opacity: 0; }
 .scanner-viewport.camera-active video { opacity: 1; }
@@ -316,6 +321,7 @@ footer a { color: inherit; text-underline-offset: 3px; }
 .scanner-reticle i:nth-child(3) { left: 0; bottom: 0; border-width: 0 0 4px 4px; }
 .scanner-reticle i:nth-child(4) { right: 0; bottom: 0; border-width: 0 4px 4px 0; }
 .scanner-controls { display: flex; align-items: center; gap: 12px; }
+.scanner-controls [hidden] { display: none !important; }
 .scanner-controls .primary { max-width: 360px; }
 .scanner-controls .secondary-button { margin-top: 24px; color: white; }
 .receive-status-card { padding: clamp(30px, 4vw, 54px); }
