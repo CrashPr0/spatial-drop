@@ -106,6 +106,20 @@
 
           <article class="beam-card beam-source-card">
             <div class="step"><em>02</em><div><h2>Choose a beam-ready GLB</h2><p>128 KB maximum · geometry and materials stay local</p></div></div>
+            <fieldset class="beam-transport-picker">
+              <legend>OPTICAL MODE</legend>
+              <div class="beam-transport-options">
+                <label>
+                  <input type="radio" name="beam-transport" value="mono" checked />
+                  <span><strong>Standard</strong><small>One monochrome QR · most reliable</small></span>
+                </label>
+                <label>
+                  <input type="radio" name="beam-transport" value="color3" />
+                  <span><strong>Color ×3 <em>LAB</em></strong><small>RGB channel multiplex · experimental</small></span>
+                </label>
+              </div>
+              <p id="beam-transport-note">Works with ordinary displays and the Spatial Drop receiver.</p>
+            </fieldset>
             <div id="beam-drop-zone" class="drop-zone beam-drop-zone" role="button" tabindex="0">
               <input id="beam-file-input" type="file" accept=".glb,model/gltf-binary" hidden />
               <span class="upload-mark">↗</span>
@@ -114,8 +128,8 @@
             <button id="beam-demo-button" class="text-button" type="button">Load the 71 KB Spartan Loop demo →</button>
             <p id="beam-error" class="error" role="alert" hidden></p>
             <div class="beam-specs" aria-label="QR Beam transfer specifications">
-              <div><span>TRANSPORT</span><strong>Animated QR</strong></div>
-              <div><span>CHUNK</span><strong>640 bytes</strong></div>
+              <div><span>TRANSPORT</span><strong id="beam-transport-spec">Animated QR</strong></div>
+              <div><span>PER SCREEN FRAME</span><strong id="beam-chunk-spec">640 bytes</strong></div>
               <div><span>INTEGRITY</span><strong>SHA-256</strong></div>
               <div><span>STORAGE</span><strong>None</strong></div>
             </div>
@@ -163,7 +177,7 @@
           </article>
 
           <article class="receive-status-card">
-            <p class="eyebrow">LIVE TRANSFER</p>
+            <div class="receive-protocol"><p class="eyebrow">LIVE TRANSFER</p><strong id="receive-transport-badge">MONO QR</strong></div>
             <div class="receive-status-heading"><h2 id="receive-title">Waiting for beam</h2><strong id="receive-percentage">0%</strong></div>
             <div class="receive-progress" aria-label="Model transfer progress"><i id="receive-progress-bar"></i></div>
             <p id="receive-detail">Open QR Beam on another screen, choose a compact GLB, and start transmitting.</p>

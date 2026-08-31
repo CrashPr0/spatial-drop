@@ -4,7 +4,12 @@ import jsQR from "jsqr";
 export const BEAM_MAX_BYTES = 128 * 1024;
 export const BEAM_CHUNK_BYTES = 640;
 const FRAME_DELAY_MS = 220;
+const COLOR_FRAME_DELAY_MS = 360;
+const COLOR_LAYERS = 3;
+const QR_RENDER_WIDTH = 720;
 const PROTOCOL = "SD1";
+
+export type BeamTransport = "mono" | "color3";
 
 export type BeamTransfer = {
   id: string;
@@ -119,6 +124,54 @@ function setMessage(element: HTMLElement, message = "") {
   element.hidden = !message;
 }
 
+function screenFrameCount(transfer: BeamTransfer, transport: BeamTransport) {
+  return transport === "color3" ? Math.ceil(transfer.frames.length / COLOR_LAYERS) : transfer.frames.length;
+}
+
+function frameDelay(transport: BeamTransport) {
+  return transport === "color3" ? COLOR_FRAME_DELAY_MS : FRAME_DELAY_MS;
+}
+
+async function renderColorFrame(canvas: HTMLCanvasElement, values: string[]) {
+  const populated = Array.from({ length: COLOR_LAYERS }, (_, index) => values[index] ?? values[0]);
+  const version = Math.max(...populated.map((value) => QRCode.create(value, { errorCorrectionLevel: "L" }).version));
+  const layers = await Promise.all(populated.map(async (value) => {
+    const layerCanvas = document.createElement("canvas");
+    await QRCode.toCanvas(layerCanvas, value, {
+      width: QR_RENDER_WIDTH,
+      margin: 3,
+      version,
+      errorCorrectionLevel: "L",
+      color: { dark: "#000000", light: "#ffffff" },
+    });
+    return layerCanvas.getContext("2d", { willReadFrequently: true })!.getImageData(0, 0, layerCanvas.width, layerCanvas.height);
+  }));
+
+  canvas.width = layers[0].width;
+  canvas.height = layers[0].height;
+  const context = canvas.getContext("2d")!;
+  const output = context.createImageData(canvas.width, canvas.height);
+  for (let offset = 0; offset < output.data.length; offset += 4) {
+    output.data[offset] = layers[0].data[offset];
+    output.data[offset + 1] = layers[1].data[offset + 1];
+    output.data[offset + 2] = layers[2].data[offset + 2];
+    output.data[offset + 3] = 255;
+  }
+  context.putImageData(output, 0, 0);
+}
+
+function isolateColorChannel(image: ImageData, channel: 0 | 1 | 2) {
+  const isolated = new Uint8ClampedArray(image.data.length);
+  for (let offset = 0; offset < image.data.length; offset += 4) {
+    const value = image.data[offset + channel];
+    isolated[offset] = value;
+    isolated[offset + 1] = value;
+    isolated[offset + 2] = value;
+    isolated[offset + 3] = 255;
+  }
+  return isolated;
+}
+
 export function stopBeamScanner() {
   cancelAnimationFrame(scannerAnimation);
   scannerAnimation = 0;
@@ -151,40 +204,82 @@ export function setupBeamLab() {
   const beamLoopLabel = document.querySelector<HTMLElement>("#beam-loop-label")!;
   const beamTransferSummary = document.querySelector<HTMLElement>("#beam-transfer-summary")!;
   const receiverLinkCanvas = document.querySelector<HTMLCanvasElement>("#receiver-link-qr")!;
+  const transportInputs = Array.from(document.querySelectorAll<HTMLInputElement>('input[name="beam-transport"]'));
+  const transportNote = document.querySelector<HTMLElement>("#beam-transport-note")!;
+  const transportSpec = document.querySelector<HTMLElement>("#beam-transport-spec")!;
+  const chunkSpec = document.querySelector<HTMLElement>("#beam-chunk-spec")!;
   let transfer: BeamTransfer | null = null;
   let beamTimer = 0;
   let frameIndex = 0;
   let loop = 1;
   let playing = false;
+  let transport: BeamTransport = new URL(window.location.href).searchParams.get("beam") === "color3" ? "color3" : "mono";
 
-  const receiverUrl = new URL(window.location.href);
-  receiverUrl.search = "";
-  receiverUrl.hash = "receive";
-  void QRCode.toCanvas(receiverLinkCanvas, receiverUrl.toString(), {
-    width: 420,
-    margin: 3,
-    errorCorrectionLevel: "H",
-    color: { dark: "#0055A2", light: "#ffffff" },
-  });
+  async function renderReceiverLink() {
+    const receiverUrl = new URL(window.location.href);
+    receiverUrl.search = "";
+    if (transport === "color3") receiverUrl.searchParams.set("beam", "color3");
+    receiverUrl.hash = "receive";
+    await QRCode.toCanvas(receiverLinkCanvas, receiverUrl.toString(), {
+      width: 420,
+      margin: 3,
+      errorCorrectionLevel: "H",
+      color: { dark: "#0055A2", light: "#ffffff" },
+    });
+  }
+
+  function updateTransferSummary() {
+    if (!transfer) return;
+    const visibleFrames = screenFrameCount(transfer, transport);
+    const seconds = Math.ceil((visibleFrames * frameDelay(transport)) / 1000);
+    beamFileDetail.textContent = transport === "color3"
+      ? `${formatBytes(transfer.size)} · ${transfer.frames.length} data frames in ${visibleFrames} color frames`
+      : `${formatBytes(transfer.size)} · ${visibleFrames} optical frames`;
+    beamTransferSummary.textContent = transport === "color3"
+      ? `${transfer.name} · ${formatBytes(transfer.size)} · ${visibleFrames} RGB-multiplexed frames · approximately ${seconds} seconds per loop. Each color channel carries a different QR.`
+      : `${transfer.name} · ${formatBytes(transfer.size)} · approximately ${seconds} seconds per loop. Missed frames are recovered automatically on the next pass.`;
+  }
+
+  function updateTransportUi() {
+    transportInputs.forEach((input) => { input.checked = input.value === transport; });
+    const isColor = transport === "color3";
+    transportNote.textContent = isColor
+      ? "Experimental: scan the newly generated receiver code. Bright displays and a steady camera work best."
+      : "Works with ordinary displays and the Spatial Drop receiver.";
+    transportSpec.textContent = isColor ? "RGB multiplex" : "Animated QR";
+    chunkSpec.textContent = isColor ? "3 × 640 bytes" : "640 bytes";
+    beamScreen.classList.toggle("color3", isColor);
+    beamCanvas.setAttribute("aria-label", isColor ? "Animated RGB multiplexed QR model data stream" : "Animated QR model data stream");
+    updateTransferSummary();
+    void renderReceiverLink();
+  }
 
   async function renderCurrentFrame(scheduleNext = false) {
     if (!transfer) return;
     try {
-      await QRCode.toCanvas(beamCanvas, transfer.frames[frameIndex], {
-        width: 720,
-        margin: 3,
-        errorCorrectionLevel: "L",
-        color: { dark: "#001f3f", light: "#ffffff" },
-      });
-      beamFrameLabel.textContent = `FRAME ${frameIndex + 1} / ${transfer.frames.length}`;
+      const visibleFrames = screenFrameCount(transfer, transport);
+      if (transport === "color3") {
+        const start = frameIndex * COLOR_LAYERS;
+        await renderColorFrame(beamCanvas, transfer.frames.slice(start, start + COLOR_LAYERS));
+      } else {
+        await QRCode.toCanvas(beamCanvas, transfer.frames[frameIndex], {
+          width: QR_RENDER_WIDTH,
+          margin: 3,
+          errorCorrectionLevel: "L",
+          color: { dark: "#001f3f", light: "#ffffff" },
+        });
+      }
+      beamFrameLabel.textContent = transport === "color3"
+        ? `COLOR FRAME ${frameIndex + 1} / ${visibleFrames} · 3 DATA LAYERS`
+        : `FRAME ${frameIndex + 1} / ${visibleFrames}`;
       beamLoopLabel.textContent = `LOOP ${loop}`;
       if (!scheduleNext || !playing) return;
       frameIndex += 1;
-      if (frameIndex >= transfer.frames.length) {
+      if (frameIndex >= visibleFrames) {
         frameIndex = 0;
         loop += 1;
       }
-      beamTimer = window.setTimeout(() => void renderCurrentFrame(true), FRAME_DELAY_MS);
+      beamTimer = window.setTimeout(() => void renderCurrentFrame(true), frameDelay(transport));
     } catch (reason) {
       playing = false;
       beamPauseButton.textContent = "Resume";
@@ -209,9 +304,7 @@ export function setupBeamLab() {
       transfer = await createBeamTransfer(file);
       frameIndex = 0;
       loop = 1;
-      const seconds = Math.ceil((transfer.frames.length * FRAME_DELAY_MS) / 1000);
-      beamFileDetail.textContent = `${formatBytes(transfer.size)} · ${transfer.frames.length} optical frames`;
-      beamTransferSummary.textContent = `${transfer.name} · ${formatBytes(transfer.size)} · approximately ${seconds} seconds per loop. Missed frames are recovered automatically on the next pass.`;
+      updateTransferSummary();
       beamStartButton.disabled = false;
       beamStartButton.querySelector("span")!.textContent = "Start optical beam";
       await renderCurrentFrame();
@@ -234,6 +327,14 @@ export function setupBeamLab() {
     void acceptBeamFile(event.dataTransfer?.files[0]);
   });
   beamFileInput.addEventListener("change", () => void acceptBeamFile(beamFileInput.files?.[0]));
+  transportInputs.forEach((input) => input.addEventListener("change", () => {
+    stopBeam();
+    transport = input.value === "color3" ? "color3" : "mono";
+    frameIndex = 0;
+    loop = 1;
+    updateTransportUi();
+    if (transfer) void renderCurrentFrame();
+  }));
   beamDemoButton.addEventListener("click", async () => {
     setMessage(beamError);
     beamDemoButton.disabled = true;
@@ -282,10 +383,18 @@ export function setupBeamLab() {
   const receiveFrames = document.querySelector<HTMLElement>("#receive-frames")!;
   const receiveBytes = document.querySelector<HTMLElement>("#receive-bytes")!;
   const receiveVerify = document.querySelector<HTMLElement>("#receive-verify")!;
+  const receiveTransportBadge = document.querySelector<HTMLElement>("#receive-transport-badge")!;
   const receivedModelStage = document.querySelector<HTMLElement>("#received-model-stage")!;
   const receivedViewer = document.querySelector<HTMLElement>("#received-viewer")!;
   let receiveBuffer: ReceiveBuffer | null = null;
   let lastScanAt = 0;
+  const receiveTransport: BeamTransport = new URL(window.location.href).searchParams.get("beam") === "color3" ? "color3" : "mono";
+
+  if (receiveTransport === "color3") {
+    receiveTransportBadge.textContent = "RGB ×3 LAB";
+    receiveTransportBadge.classList.add("color3");
+    receiveDetail.textContent = "Color receiver armed. Point the camera at an RGB ×3 Spatial Drop beam.";
+  }
 
   function initializeBuffer(frame: ParsedBeamFrame) {
     receiveBuffer = { id: frame.id, hash: frame.hash, name: frame.name, size: frame.size, total: frame.total, chunks: new Map(), finalizing: false };
@@ -334,15 +443,28 @@ export function setupBeamLab() {
 
   function scanFrame(timestamp: number) {
     if (!scannerStream) return;
-    if (timestamp - lastScanAt > 80 && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+    const scanInterval = receiveTransport === "color3" ? 140 : 80;
+    if (timestamp - lastScanAt > scanInterval && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
       lastScanAt = timestamp;
-      const scale = Math.min(1, 960 / video.videoWidth);
+      const maxScanWidth = receiveTransport === "color3" ? 640 : 960;
+      const scale = Math.min(1, maxScanWidth / video.videoWidth);
       scanCanvas.width = Math.max(1, Math.round(video.videoWidth * scale));
       scanCanvas.height = Math.max(1, Math.round(video.videoHeight * scale));
       scanContext.drawImage(video, 0, 0, scanCanvas.width, scanCanvas.height);
       const image = scanContext.getImageData(0, 0, scanCanvas.width, scanCanvas.height);
-      const code = jsQR(image.data, image.width, image.height, { inversionAttempts: "dontInvert" });
-      if (code?.data.startsWith(`${PROTOCOL}|`)) consumeFrame(code.data);
+      if (receiveTransport === "color3") {
+        const decoded = new Set<string>();
+        ([0, 1, 2] as const).forEach((channel) => {
+          const code = jsQR(isolateColorChannel(image, channel), image.width, image.height, { inversionAttempts: "dontInvert" });
+          if (code?.data.startsWith(`${PROTOCOL}|`) && !decoded.has(code.data)) {
+            decoded.add(code.data);
+            consumeFrame(code.data);
+          }
+        });
+      } else {
+        const code = jsQR(image.data, image.width, image.height, { inversionAttempts: "dontInvert" });
+        if (code?.data.startsWith(`${PROTOCOL}|`)) consumeFrame(code.data);
+      }
     }
     scannerAnimation = requestAnimationFrame(scanFrame);
   }
@@ -377,4 +499,6 @@ export function setupBeamLab() {
     stopBeamScanner();
     if (receivedObjectUrl) URL.revokeObjectURL(receivedObjectUrl);
   });
+
+  updateTransportUi();
 }

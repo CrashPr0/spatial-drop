@@ -258,6 +258,18 @@ footer a { color: inherit; text-underline-offset: 3px; }
 .receiver-link-qr { width: min(100%, 360px); margin: 28px auto 20px; padding: 14px; background: white; border: 1px solid var(--line); box-shadow: 10px 10px 0 var(--sjsu-gold); }
 .receiver-link-qr canvas { display: block; width: 100% !important; height: auto !important; }
 .beam-caption { margin: auto 0 0; padding-top: 25px; color: var(--muted); font-size: 11px; line-height: 1.55; }
+.beam-transport-picker { margin: 26px 0 20px; }
+.beam-transport-options { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.beam-transport-options label { position: relative; cursor: pointer; }
+.beam-transport-options input { position: absolute; opacity: 0; pointer-events: none; }
+.beam-transport-options label > span { display: block; min-height: 72px; padding: 14px; border: 1px solid var(--line); background: #f7f8f9; transition: border-color .15s, box-shadow .15s, background .15s; }
+.beam-transport-options input:checked + span { border-color: var(--sjsu-blue); background: white; box-shadow: inset 0 -4px 0 var(--sjsu-gold); }
+.beam-transport-options input:focus-visible + span { outline: 3px solid rgba(0, 85, 162, .2); outline-offset: 2px; }
+.beam-transport-options strong, .beam-transport-options small { display: block; }
+.beam-transport-options strong { color: var(--spartan-navy); font-size: 13px; }
+.beam-transport-options strong em { display: inline-block; margin-left: 4px; padding: 3px 5px; background: var(--sjsu-gold); color: var(--spartan-navy); font: 900 7px/1 monospace; letter-spacing: .08em; vertical-align: 2px; }
+.beam-transport-options small { margin-top: 6px; color: var(--muted); font-size: 9px; line-height: 1.35; }
+#beam-transport-note { margin: 9px 0 0; color: var(--muted); font-size: 10px; line-height: 1.45; }
 .beam-drop-zone { margin-bottom: 20px; }
 .text-button { border: 0; border-bottom: 1px solid currentColor; background: transparent; color: var(--sjsu-blue); padding: 3px 0; font-weight: 800; font-size: 12px; cursor: pointer; }
 .beam-specs { display: grid; grid-template-columns: repeat(2, 1fr); margin-top: 23px; border-block: 1px solid var(--line); }
@@ -276,6 +288,7 @@ footer a { color: inherit; text-underline-offset: 3px; }
 .beam-controls { display: flex; gap: 10px; margin-top: 26px; }
 .beam-controls button, .secondary-button { border: 1px solid currentColor; background: transparent; color: inherit; padding: 12px 15px; font-weight: 800; cursor: pointer; }
 .beam-screen { position: relative; width: min(100%, 720px); justify-self: end; padding: 18px 18px 48px; background: white; box-shadow: 16px 16px 0 var(--spartan-navy); }
+.beam-screen.color3 { box-shadow: 6px 6px 0 #f03, 12px 12px 0 #00b87a, 18px 18px 0 #1268d6; }
 .beam-screen:fullscreen { display: grid; place-items: center; width: 100vw; background: #050b14; box-shadow: none; padding: 4vh; }
 .beam-screen:fullscreen canvas { max-height: 82vh; width: auto !important; }
 .beam-screen canvas { display: block; width: 100% !important; height: auto !important; image-rendering: pixelated; }
@@ -299,6 +312,10 @@ footer a { color: inherit; text-underline-offset: 3px; }
 .scanner-controls .primary { max-width: 360px; }
 .scanner-controls .secondary-button { margin-top: 24px; color: white; }
 .receive-status-card { padding: clamp(30px, 4vw, 54px); }
+.receive-protocol { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.receive-protocol .eyebrow { margin: 0; }
+.receive-protocol > strong { padding: 7px 9px; border: 1px solid var(--sjsu-blue); color: var(--sjsu-blue); font: 900 8px/1 monospace; letter-spacing: .1em; }
+.receive-protocol > strong.color3 { border: 0; background: linear-gradient(90deg, #e7235b, #00a86b, #1769d2); color: white; }
 .receive-status-heading { display: flex; align-items: end; justify-content: space-between; gap: 20px; margin: 32px 0 16px; }
 .receive-status-heading h2 { margin: 0; color: var(--spartan-navy); font-size: clamp(30px, 3vw, 46px); line-height: 1; letter-spacing: -.045em; }
 .receive-status-heading strong { color: var(--sjsu-blue); font-size: 24px; }
@@ -359,6 +376,7 @@ footer a { color: inherit; text-underline-offset: 3px; }
   .lab-intro { padding: 58px 0 44px; }
   .lab-intro h1 { font-size: 58px; }
   .beam-card { margin-inline: -16px; border-inline: 0; }
+  .beam-transport-options { grid-template-columns: 1fr; }
   .beam-display-card { margin-inline: -16px; padding: 38px 18px; }
   .beam-screen { padding: 10px 10px 42px; box-shadow: 8px 8px 0 var(--spartan-navy); }
   .beam-screen-hud { left: 10px; right: 10px; }
