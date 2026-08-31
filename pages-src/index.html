@@ -94,7 +94,7 @@
         <section class="lab-intro">
           <p class="eyebrow">EXPERIMENT 01 · SERVERLESS MODEL TRANSFER</p>
           <h1>Beam a model<br />through light.</h1>
-          <p>One QR opens Spatial Drop. A second, animated stream carries the GLB itself—frame by frame, directly from screen to camera.</p>
+          <p>One QR opens Spatial Drop. Choose a resilient fountain QR stream or a high-speed Cimbar color field to carry the GLB directly from screen to camera.</p>
         </section>
 
         <section class="beam-workbench">
@@ -111,14 +111,14 @@
               <div class="beam-transport-options">
                 <label>
                   <input type="radio" name="beam-transport" value="mono" checked />
-                  <span><strong>Standard</strong><small>One monochrome QR · most reliable</small></span>
+                  <span><strong>Fountain QR</strong><small>Compressed monochrome · universal fallback</small></span>
                 </label>
                 <label>
-                  <input type="radio" name="beam-transport" value="color3" />
-                  <span><strong>Color ×3 <em>LAB</em></strong><small>RGB channel multiplex · experimental</small></span>
+                  <input type="radio" name="beam-transport" value="cimbar" />
+                  <span><strong>Cimbar Turbo <em>FAST</em></strong><small>Color field · WebAssembly fountain decoder</small></span>
                 </label>
               </div>
-              <p id="beam-transport-note">Works with ordinary displays and the Spatial Drop receiver.</p>
+              <p id="beam-transport-note">Reliable fallback: compressed Base32 frames plus fountain recovery. No exact missed frame is required.</p>
             </fieldset>
             <div id="beam-drop-zone" class="drop-zone beam-drop-zone" role="button" tabindex="0">
               <input id="beam-file-input" type="file" accept=".glb,model/gltf-binary" hidden />
@@ -148,7 +148,8 @@
             </div>
             <div id="beam-screen" class="beam-screen">
               <canvas id="beam-canvas" aria-label="Animated QR model data stream"></canvas>
-              <div class="beam-screen-hud"><span id="beam-frame-label">FRAME 0 / 0</span><span id="beam-loop-label">LOOP 1</span></div>
+              <iframe id="cimbar-sender-frame" title="Cimbar model transmitter" allow="fullscreen" hidden></iframe>
+              <div class="beam-screen-hud"><span id="beam-frame-label">SOURCE 0 / 0</span><span id="beam-loop-label">RATELESS STREAM</span></div>
             </div>
           </article>
         </section>
@@ -158,7 +159,7 @@
         <section class="lab-intro receive-intro">
           <p class="eyebrow">QR BEAM RECEIVER · CAMERA TO GLB</p>
           <h1>Catch the<br />model.</h1>
-          <p>Point the camera at a Spatial Drop beam. Missed frames are recovered on the next loop, then the finished GLB is verified and opened locally.</p>
+          <p>Point the camera at a Spatial Drop beam. Fountain recovery turns any sufficient collection of good frames back into a verified local GLB.</p>
         </section>
 
         <section class="receive-workbench">
@@ -166,6 +167,7 @@
             <div class="scanner-viewport">
               <video id="beam-video" playsinline muted aria-label="QR Beam camera preview"></video>
               <canvas id="beam-scan-canvas" hidden></canvas>
+              <iframe id="cimbar-receiver-frame" title="Cimbar camera receiver" allow="camera; fullscreen" hidden></iframe>
               <div class="scanner-reticle" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
               <div id="scanner-idle" class="scanner-idle"><span>OPTICAL RECEIVER</span><strong>Camera is off</strong></div>
             </div>
@@ -195,7 +197,7 @@
         </section>
       </div>
 
-      <footer><span>SPATIAL DROP · SJSU-INSPIRED XR PROTOTYPE</span><span>XR ENGINE © 2026 NIANTIC SPATIAL, INC. · <a href="https://github.com/8thwall/engine/blob/main/LICENSE">LICENSE</a></span></footer>
+      <footer><span>SPATIAL DROP · SJSU-INSPIRED XR PROTOTYPE</span><span>XR ENGINE © 2026 NIANTIC SPATIAL, INC. · <a href="https://github.com/8thwall/engine/blob/main/LICENSE">LICENSE</a> · CIMBAR <a href="./cimbar/LICENSE">MPL-2.0</a></span></footer>
 
       <div id="beam-ar-overlay" class="beam-ar-overlay" hidden>
         <div id="beam-ar-root" class="beam-ar-root"></div>

@@ -1,122 +1,33 @@
 import QRCode from "qrcode";
 import jsQR from "jsqr";
+import {
+  BEAM_CHUNK_BYTES,
+  BEAM_PROTOCOL,
+  type BeamTransfer,
+  type ParsedBeamFrame,
+  type ReceiveBuffer,
+  addBeamFrame,
+  assembleBeamTransfer,
+  createBeamFrame,
+  createBeamTransfer,
+  createCimbarFile,
+  createReceiveBuffer,
+  parseBeamFrame,
+  verifyCimbarModel,
+} from "./beam-codec";
 
-export const BEAM_MAX_BYTES = 128 * 1024;
-export const BEAM_CHUNK_BYTES = 640;
-const FRAME_DELAY_MS = 220;
-const COLOR_FRAME_DELAY_MS = 360;
-const COLOR_LAYERS = 3;
+const FRAME_DELAY_MS = 330;
 const QR_RENDER_WIDTH = 720;
-const PROTOCOL = "SD1";
-
-export type BeamTransport = "mono" | "color3";
-
-export type BeamTransfer = {
-  id: string;
-  hash: string;
-  name: string;
-  size: number;
-  frames: string[];
-};
-
-export type ParsedBeamFrame = {
-  id: string;
-  hash: string;
-  name: string;
-  size: number;
-  index: number;
-  total: number;
-  bytes: Uint8Array;
-};
-
-type ReceiveBuffer = Omit<ParsedBeamFrame, "index" | "bytes"> & {
-  chunks: Map<number, Uint8Array>;
-  finalizing: boolean;
-};
+const QR_VERSION = 18;
+type BeamTransport = "mono" | "cimbar";
 
 let scannerStream: MediaStream | null = null;
 let scannerAnimation = 0;
 let receivedObjectUrl = "";
 
 function formatBytes(bytes: number) {
-  return bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`;
-}
-
-function bytesToBase64(bytes: Uint8Array) {
-  let binary = "";
-  for (let index = 0; index < bytes.length; index += 1) binary += String.fromCharCode(bytes[index]);
-  return btoa(binary);
-}
-
-function base64ToBytes(value: string) {
-  const binary = atob(value);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-  return bytes;
-}
-
-async function sha256Hex(bytes: ArrayBuffer | Uint8Array) {
-  const source = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-  const copy = new Uint8Array(source.byteLength);
-  copy.set(source);
-  const digest = await crypto.subtle.digest("SHA-256", copy.buffer);
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-export async function createBeamTransfer(file: File): Promise<BeamTransfer> {
-  if (!file.name.toLowerCase().endsWith(".glb")) throw new Error("QR Beam currently accepts binary .glb models.");
-  if (file.size > BEAM_MAX_BYTES) throw new Error("This model is over the 128 KB optical transfer limit. Optimize it, then try again.");
-  const buffer = await file.arrayBuffer();
-  if (new TextDecoder().decode(buffer.slice(0, 4)) !== "glTF") throw new Error("This file is not a valid binary glTF model.");
-
-  const bytes = new Uint8Array(buffer);
-  const hash = await sha256Hex(bytes);
-  const id = hash.slice(0, 12);
-  const name = encodeURIComponent(file.name.slice(0, 80));
-  const total = Math.ceil(bytes.length / BEAM_CHUNK_BYTES);
-  const frames: string[] = [];
-
-  for (let index = 0; index < total; index += 1) {
-    const chunk = bytes.slice(index * BEAM_CHUNK_BYTES, (index + 1) * BEAM_CHUNK_BYTES);
-    frames.push([PROTOCOL, id, index, total, bytes.length, hash, name, bytesToBase64(chunk)].join("|"));
-  }
-  return { id, hash, name: file.name, size: bytes.length, frames };
-}
-
-export function parseBeamFrame(value: string): ParsedBeamFrame | null {
-  const parts = value.split("|");
-  if (parts.length !== 8 || parts[0] !== PROTOCOL) return null;
-  const [, id, indexValue, totalValue, sizeValue, hash, encodedName, payload] = parts;
-  const index = Number(indexValue);
-  const total = Number(totalValue);
-  const size = Number(sizeValue);
-  if (!/^[a-f0-9]{12}$/.test(id) || !/^[a-f0-9]{64}$/.test(hash)) return null;
-  if (!Number.isInteger(index) || !Number.isInteger(total) || !Number.isInteger(size)) return null;
-  if (index < 0 || total < 1 || index >= total || total > 512 || size < 1 || size > BEAM_MAX_BYTES) return null;
-  try {
-    const bytes = base64ToBytes(payload);
-    if (bytes.length < 1 || bytes.length > BEAM_CHUNK_BYTES) return null;
-    return { id, hash, name: decodeURIComponent(encodedName), size, index, total, bytes };
-  } catch {
-    return null;
-  }
-}
-
-export async function assembleBeamTransfer(buffer: ReceiveBuffer) {
-  if (buffer.chunks.size !== buffer.total) throw new Error("Some transfer frames are still missing.");
-  const bytes = new Uint8Array(buffer.size);
-  let offset = 0;
-  for (let index = 0; index < buffer.total; index += 1) {
-    const chunk = buffer.chunks.get(index);
-    if (!chunk) throw new Error(`Frame ${index + 1} is missing.`);
-    const remaining = bytes.length - offset;
-    bytes.set(chunk.slice(0, remaining), offset);
-    offset += Math.min(chunk.length, remaining);
-  }
-  if (offset !== buffer.size) throw new Error("The reconstructed model size does not match its manifest.");
-  if (await sha256Hex(bytes) !== buffer.hash) throw new Error("Integrity check failed. Scan another loop and try again.");
-  if (new TextDecoder().decode(bytes.slice(0, 4)) !== "glTF") throw new Error("The reconstructed data is not a valid GLB.");
-  return bytes;
+  if (bytes < 1024) return `${bytes} B`;
+  return `${(bytes / 1024).toFixed(1)} KB`;
 }
 
 function setMessage(element: HTMLElement, message = "") {
@@ -124,52 +35,8 @@ function setMessage(element: HTMLElement, message = "") {
   element.hidden = !message;
 }
 
-function screenFrameCount(transfer: BeamTransfer, transport: BeamTransport) {
-  return transport === "color3" ? Math.ceil(transfer.frames.length / COLOR_LAYERS) : transfer.frames.length;
-}
-
-function frameDelay(transport: BeamTransport) {
-  return transport === "color3" ? COLOR_FRAME_DELAY_MS : FRAME_DELAY_MS;
-}
-
-async function renderColorFrame(canvas: HTMLCanvasElement, values: string[]) {
-  const populated = Array.from({ length: COLOR_LAYERS }, (_, index) => values[index] ?? values[0]);
-  const version = Math.max(...populated.map((value) => QRCode.create(value, { errorCorrectionLevel: "L" }).version));
-  const layers = await Promise.all(populated.map(async (value) => {
-    const layerCanvas = document.createElement("canvas");
-    await QRCode.toCanvas(layerCanvas, value, {
-      width: QR_RENDER_WIDTH,
-      margin: 3,
-      version,
-      errorCorrectionLevel: "L",
-      color: { dark: "#000000", light: "#ffffff" },
-    });
-    return layerCanvas.getContext("2d", { willReadFrequently: true })!.getImageData(0, 0, layerCanvas.width, layerCanvas.height);
-  }));
-
-  canvas.width = layers[0].width;
-  canvas.height = layers[0].height;
-  const context = canvas.getContext("2d")!;
-  const output = context.createImageData(canvas.width, canvas.height);
-  for (let offset = 0; offset < output.data.length; offset += 4) {
-    output.data[offset] = layers[0].data[offset];
-    output.data[offset + 1] = layers[1].data[offset + 1];
-    output.data[offset + 2] = layers[2].data[offset + 2];
-    output.data[offset + 3] = 255;
-  }
-  context.putImageData(output, 0, 0);
-}
-
-function isolateColorChannel(image: ImageData, channel: 0 | 1 | 2) {
-  const isolated = new Uint8ClampedArray(image.data.length);
-  for (let offset = 0; offset < image.data.length; offset += 4) {
-    const value = image.data[offset + channel];
-    isolated[offset] = value;
-    isolated[offset + 1] = value;
-    isolated[offset + 2] = value;
-    isolated[offset + 3] = 255;
-  }
-  return isolated;
+function cimbarUrl(file: "index.html" | "recv.html") {
+  return new URL(`cimbar/${file}?embed=1`, `${window.location.origin}${window.location.pathname}`).toString();
 }
 
 export function stopBeamScanner() {
@@ -180,6 +47,7 @@ export function stopBeamScanner() {
   const video = document.querySelector<HTMLVideoElement>("#beam-video");
   const scanCanvas = document.querySelector<HTMLCanvasElement>("#beam-scan-canvas");
   const viewport = document.querySelector<HTMLElement>(".scanner-viewport");
+  const cimbarFrame = document.querySelector<HTMLIFrameElement>("#cimbar-receiver-frame");
   if (video) {
     video.pause();
     video.srcObject = null;
@@ -191,7 +59,12 @@ export function stopBeamScanner() {
     scanCanvas.height = 1;
     scanCanvas.getContext("2d")?.clearRect(0, 0, 1, 1);
   }
-  viewport?.classList.remove("camera-active");
+  if (cimbarFrame) {
+    cimbarFrame.contentWindow?.postMessage({ type: "spatialdrop:cimbar-stop" }, window.location.origin);
+    cimbarFrame.hidden = true;
+    cimbarFrame.src = "about:blank";
+  }
+  viewport?.classList.remove("camera-active", "cimbar-active");
   const startButton = document.querySelector<HTMLButtonElement>("#scanner-start-button");
   const stopButton = document.querySelector<HTMLButtonElement>("#scanner-stop-button");
   const idle = document.querySelector<HTMLElement>("#scanner-idle");
@@ -213,6 +86,7 @@ export function setupBeamLab() {
   const beamDisplayCard = document.querySelector<HTMLElement>("#beam-display-card")!;
   const beamScreen = document.querySelector<HTMLElement>("#beam-screen")!;
   const beamCanvas = document.querySelector<HTMLCanvasElement>("#beam-canvas")!;
+  const cimbarSenderFrame = document.querySelector<HTMLIFrameElement>("#cimbar-sender-frame")!;
   const beamFrameLabel = document.querySelector<HTMLElement>("#beam-frame-label")!;
   const beamLoopLabel = document.querySelector<HTMLElement>("#beam-loop-label")!;
   const beamTransferSummary = document.querySelector<HTMLElement>("#beam-transfer-summary")!;
@@ -223,15 +97,15 @@ export function setupBeamLab() {
   const chunkSpec = document.querySelector<HTMLElement>("#beam-chunk-spec")!;
   let transfer: BeamTransfer | null = null;
   let beamTimer = 0;
-  let frameIndex = 0;
-  let loop = 1;
+  let sequence = 0;
   let playing = false;
-  let transport: BeamTransport = new URL(window.location.href).searchParams.get("beam") === "color3" ? "color3" : "mono";
+  let cimbarReady = false;
+  let transport: BeamTransport = new URL(window.location.href).searchParams.get("beam") === "cimbar" ? "cimbar" : "mono";
 
   async function renderReceiverLink() {
     const receiverUrl = new URL(window.location.href);
     receiverUrl.search = "";
-    if (transport === "color3") receiverUrl.searchParams.set("beam", "color3");
+    if (transport === "cimbar") receiverUrl.searchParams.set("beam", "cimbar");
     receiverUrl.hash = "receive";
     await QRCode.toCanvas(receiverLinkCanvas, receiverUrl.toString(), {
       width: 420,
@@ -241,86 +115,115 @@ export function setupBeamLab() {
     });
   }
 
-  function updateTransferSummary() {
-    if (!transfer) return;
-    const visibleFrames = screenFrameCount(transfer, transport);
-    const seconds = Math.ceil((visibleFrames * frameDelay(transport)) / 1000);
-    beamFileDetail.textContent = transport === "color3"
-      ? `${formatBytes(transfer.size)} · ${transfer.frames.length} data frames in ${visibleFrames} color frames`
-      : `${formatBytes(transfer.size)} · ${visibleFrames} optical frames`;
-    beamTransferSummary.textContent = transport === "color3"
-      ? `${transfer.name} · ${formatBytes(transfer.size)} · ${visibleFrames} RGB-multiplexed frames · approximately ${seconds} seconds per loop. Each color channel carries a different QR.`
-      : `${transfer.name} · ${formatBytes(transfer.size)} · approximately ${seconds} seconds per loop. Missed frames are recovered automatically on the next pass.`;
-  }
-
-  function updateTransportUi() {
-    transportInputs.forEach((input) => { input.checked = input.value === transport; });
-    const isColor = transport === "color3";
-    transportNote.textContent = isColor
-      ? "Experimental: scan the newly generated receiver code. Bright displays and a steady camera work best."
-      : "Works with ordinary displays and the Spatial Drop receiver.";
-    transportSpec.textContent = isColor ? "RGB multiplex" : "Animated QR";
-    chunkSpec.textContent = isColor ? "3 × 640 bytes" : "640 bytes";
-    beamScreen.classList.toggle("color3", isColor);
-    beamCanvas.setAttribute("aria-label", isColor ? "Animated RGB multiplexed QR model data stream" : "Animated QR model data stream");
-    updateTransferSummary();
-    void renderReceiverLink();
-  }
-
-  async function renderCurrentFrame(scheduleNext = false) {
-    if (!transfer) return;
-    try {
-      const visibleFrames = screenFrameCount(transfer, transport);
-      if (transport === "color3") {
-        const start = frameIndex * COLOR_LAYERS;
-        await renderColorFrame(beamCanvas, transfer.frames.slice(start, start + COLOR_LAYERS));
-      } else {
-        await QRCode.toCanvas(beamCanvas, transfer.frames[frameIndex], {
-          width: QR_RENDER_WIDTH,
-          margin: 3,
-          errorCorrectionLevel: "L",
-          color: { dark: "#001f3f", light: "#ffffff" },
-        });
-      }
-      beamFrameLabel.textContent = transport === "color3"
-        ? `COLOR FRAME ${frameIndex + 1} / ${visibleFrames} · 3 DATA LAYERS`
-        : `FRAME ${frameIndex + 1} / ${visibleFrames}`;
-      beamLoopLabel.textContent = `LOOP ${loop}`;
-      if (!scheduleNext || !playing) return;
-      frameIndex += 1;
-      if (frameIndex >= visibleFrames) {
-        frameIndex = 0;
-        loop += 1;
-      }
-      beamTimer = window.setTimeout(() => void renderCurrentFrame(true), frameDelay(transport));
-    } catch (reason) {
-      playing = false;
-      beamPauseButton.textContent = "Resume";
-      setMessage(beamError, reason instanceof Error ? reason.message : "Could not render the optical stream.");
+  function stopCimbarSender() {
+    if (!cimbarSenderFrame.hidden) {
+      cimbarSenderFrame.contentWindow?.postMessage({ type: "spatialdrop:cimbar-pause", paused: true }, window.location.origin);
+      cimbarSenderFrame.hidden = true;
+      cimbarSenderFrame.src = "about:blank";
     }
+    cimbarReady = false;
   }
 
   function stopBeam() {
     playing = false;
     window.clearTimeout(beamTimer);
     beamPauseButton.textContent = "Resume";
+    if (transport === "cimbar") cimbarSenderFrame.contentWindow?.postMessage({ type: "spatialdrop:cimbar-pause", paused: true }, window.location.origin);
+  }
+
+  function updateTransferSummary() {
+    if (!transfer) return;
+    if (transport === "cimbar") {
+      beamFileDetail.textContent = `${formatBytes(transfer.size)} · Cimbar Mode B`;
+      beamTransferSummary.textContent = `${transfer.name} · ${formatBytes(transfer.size)} · zstd compression, Reed–Solomon correction, and a rateless fountain stream at 15 frames per second.`;
+    } else {
+      const ratio = Math.round((transfer.transportSize / transfer.size) * 100);
+      const compression = transfer.compressed ? `${formatBytes(transfer.transportSize)} after gzip (${ratio}%)` : "raw payload";
+      beamFileDetail.textContent = `${formatBytes(transfer.size)} · ${compression} · ${transfer.fragments.length} source fragments`;
+      beamTransferSummary.textContent = `${transfer.name} · ${transfer.fragments.length} source fragments · compact Base32 QR version ${QR_VERSION}. After the source pass, every new frame adds rateless recovery data.`;
+    }
+  }
+
+  function updateTransportUi() {
+    transportInputs.forEach((input) => { input.checked = input.value === transport; });
+    const isCimbar = transport === "cimbar";
+    transportNote.textContent = isCimbar
+      ? "Fastest path. Uses the embedded Cimbar WebAssembly decoder; flashing imagery warning applies."
+      : "Reliable fallback: compressed Base32 frames plus fountain recovery. No exact missed frame is required.";
+    transportSpec.textContent = isCimbar ? "Cimbar WASM" : "Fountain QR";
+    chunkSpec.textContent = isCimbar ? "zstd + Wirehair" : `${BEAM_CHUNK_BYTES} B + parity`;
+    beamScreen.classList.toggle("cimbar", isCimbar);
+    updateTransferSummary();
+    void renderReceiverLink();
+  }
+
+  async function renderCurrentFrame(scheduleNext = false) {
+    if (!transfer || transport !== "mono") return;
+    try {
+      const value = createBeamFrame(transfer, sequence);
+      await QRCode.toCanvas(beamCanvas, value, {
+        width: QR_RENDER_WIDTH,
+        margin: 4,
+        version: QR_VERSION,
+        errorCorrectionLevel: "L",
+        color: { dark: "#001f3f", light: "#ffffff" },
+      });
+      if (sequence < transfer.fragments.length) {
+        beamFrameLabel.textContent = `SOURCE ${sequence + 1} / ${transfer.fragments.length}`;
+      } else {
+        beamFrameLabel.textContent = `RECOVERY +${sequence - transfer.fragments.length + 1}`;
+      }
+      beamLoopLabel.textContent = "RATELESS STREAM";
+      if (!scheduleNext || !playing) return;
+      sequence = sequence >= 0xfffffffe ? transfer.fragments.length : sequence + 1;
+      beamTimer = window.setTimeout(() => void renderCurrentFrame(true), FRAME_DELAY_MS);
+    } catch (reason) {
+      stopBeam();
+      setMessage(beamError, reason instanceof Error ? reason.message : "Could not render the optical stream.");
+    }
+  }
+
+  function sendCimbarModel() {
+    if (!transfer || !cimbarReady || transport !== "cimbar") return;
+    cimbarSenderFrame.contentWindow?.postMessage({
+      type: "spatialdrop:cimbar-send",
+      file: createCimbarFile(transfer),
+      mode: "B",
+      fps: 15,
+    }, window.location.origin);
+    beamFrameLabel.textContent = "CIMBAR MODE B · 15 FPS";
+    beamLoopLabel.textContent = "FOUNTAIN STREAM";
+  }
+
+  function startCimbarSender() {
+    if (!transfer) return;
+    window.clearTimeout(beamTimer);
+    beamCanvas.hidden = true;
+    cimbarSenderFrame.hidden = false;
+    cimbarReady = false;
+    cimbarSenderFrame.src = cimbarUrl("index.html");
+    beamFrameLabel.textContent = "STARTING CIMBAR WASM…";
+    beamLoopLabel.textContent = "TURBO";
   }
 
   async function acceptBeamFile(file?: File) {
     if (!file) return;
     stopBeam();
+    stopCimbarSender();
     setMessage(beamError);
     beamStartButton.disabled = true;
     beamFileTitle.textContent = file.name;
-    beamFileDetail.textContent = "Preparing manifest and integrity hash…";
+    beamFileDetail.textContent = "Compressing, hashing, and building recovery fragments…";
     try {
       transfer = await createBeamTransfer(file);
-      frameIndex = 0;
-      loop = 1;
+      sequence = 0;
       updateTransferSummary();
       beamStartButton.disabled = false;
-      beamStartButton.querySelector("span")!.textContent = "Start optical beam";
-      await renderCurrentFrame();
+      beamStartButton.querySelector("span")!.textContent = transport === "cimbar" ? "Start Cimbar Turbo" : "Start fountain beam";
+      if (transport === "mono") {
+        beamCanvas.hidden = false;
+        await renderCurrentFrame();
+      }
     } catch (reason) {
       transfer = null;
       beamFileDetail.textContent = "Could not prepare this model";
@@ -342,11 +245,13 @@ export function setupBeamLab() {
   beamFileInput.addEventListener("change", () => void acceptBeamFile(beamFileInput.files?.[0]));
   transportInputs.forEach((input) => input.addEventListener("change", () => {
     stopBeam();
-    transport = input.value === "color3" ? "color3" : "mono";
-    frameIndex = 0;
-    loop = 1;
+    stopCimbarSender();
+    transport = input.value === "cimbar" ? "cimbar" : "mono";
+    sequence = 0;
+    beamCanvas.hidden = transport === "cimbar";
+    beamStartButton.querySelector("span")!.textContent = transport === "cimbar" ? "Start Cimbar Turbo" : "Start fountain beam";
     updateTransportUi();
-    if (transfer) void renderCurrentFrame();
+    if (transfer && transport === "mono") void renderCurrentFrame();
   }));
   beamDemoButton.addEventListener("click", async () => {
     setMessage(beamError);
@@ -369,15 +274,22 @@ export function setupBeamLab() {
     beamPauseButton.textContent = "Pause";
     beamDisplayCard.hidden = false;
     beamDisplayCard.scrollIntoView({ behavior: "smooth", block: "center" });
-    void renderCurrentFrame(true);
+    if (transport === "cimbar") startCimbarSender();
+    else {
+      stopCimbarSender();
+      beamCanvas.hidden = false;
+      void renderCurrentFrame(true);
+    }
   });
   beamPauseButton.addEventListener("click", () => {
     if (!transfer) return;
-    if (playing) stopBeam();
-    else {
+    if (playing) {
+      stopBeam();
+    } else {
       playing = true;
       beamPauseButton.textContent = "Pause";
-      void renderCurrentFrame(true);
+      if (transport === "cimbar") cimbarSenderFrame.contentWindow?.postMessage({ type: "spatialdrop:cimbar-pause", paused: false }, window.location.origin);
+      else void renderCurrentFrame(true);
     }
   });
   beamFullscreenButton.addEventListener("click", () => void beamScreen.requestFullscreen?.());
@@ -385,10 +297,12 @@ export function setupBeamLab() {
   const video = document.querySelector<HTMLVideoElement>("#beam-video")!;
   const scanCanvas = document.querySelector<HTMLCanvasElement>("#beam-scan-canvas")!;
   const scanContext = scanCanvas.getContext("2d", { willReadFrequently: true })!;
+  const scannerViewport = document.querySelector<HTMLElement>(".scanner-viewport")!;
   const scannerIdle = document.querySelector<HTMLElement>("#scanner-idle")!;
   const scannerStartButton = document.querySelector<HTMLButtonElement>("#scanner-start-button")!;
   const scannerStopButton = document.querySelector<HTMLButtonElement>("#scanner-stop-button")!;
   const scannerError = document.querySelector<HTMLElement>("#scanner-error")!;
+  const cimbarReceiverFrame = document.querySelector<HTMLIFrameElement>("#cimbar-receiver-frame")!;
   const receiveTitle = document.querySelector<HTMLElement>("#receive-title")!;
   const receivePercentage = document.querySelector<HTMLElement>("#receive-percentage")!;
   const receiveProgressBar = document.querySelector<HTMLElement>("#receive-progress-bar")!;
@@ -401,39 +315,51 @@ export function setupBeamLab() {
   const receivedViewer = document.querySelector<HTMLElement>("#received-viewer")!;
   let receiveBuffer: ReceiveBuffer | null = null;
   let lastScanAt = 0;
-  const receiveTransport: BeamTransport = new URL(window.location.href).searchParams.get("beam") === "color3" ? "color3" : "mono";
+  const receiveTransport: BeamTransport = new URL(window.location.href).searchParams.get("beam") === "cimbar" ? "cimbar" : "mono";
 
-  if (receiveTransport === "color3") {
-    receiveTransportBadge.textContent = "RGB ×3 LAB";
-    receiveTransportBadge.classList.add("color3");
-    receiveDetail.textContent = "Color receiver armed. Point the camera at an RGB ×3 Spatial Drop beam.";
+  if (receiveTransport === "cimbar") {
+    receiveTransportBadge.textContent = "CIMBAR TURBO";
+    receiveTransportBadge.classList.add("cimbar");
+    scannerStartButton.querySelector("span")!.textContent = "Start Cimbar receiver";
+    receiveDetail.textContent = "Cimbar receiver armed. It accepts fountain frames in any order and corrects damaged symbols.";
+  } else {
+    receiveTransportBadge.textContent = "FOUNTAIN QR";
   }
 
   function initializeBuffer(frame: ParsedBeamFrame) {
-    receiveBuffer = { id: frame.id, hash: frame.hash, name: frame.name, size: frame.size, total: frame.total, chunks: new Map(), finalizing: false };
-    receiveTitle.textContent = frame.name;
-    receiveDetail.textContent = "Beam found. Keep the transmitting code centered until verification completes.";
+    receiveBuffer = createReceiveBuffer(frame);
+    receiveTitle.textContent = "Spatial Drop GLB";
+    receiveDetail.textContent = "Beam found. Every independent frame raises the recovery rank; exact missed frames are not required.";
     receiveVerify.textContent = "Collecting";
+  }
+
+  function publishReceivedModel(model: { bytes: Uint8Array; name: string }, method: string) {
+    if (receivedObjectUrl) URL.revokeObjectURL(receivedObjectUrl);
+    const copy = new Uint8Array(model.bytes.length);
+    copy.set(model.bytes);
+    receivedObjectUrl = URL.createObjectURL(new Blob([copy.buffer], { type: "model/gltf-binary" }));
+    receivedViewer.setAttribute("src", receivedObjectUrl);
+    receivedModelStage.hidden = false;
+    receiveTitle.textContent = model.name;
+    receivePercentage.textContent = "100%";
+    receiveProgressBar.style.width = "100%";
+    receiveBytes.textContent = formatBytes(model.bytes.length);
+    receiveVerify.textContent = "Verified";
+    receiveDetail.textContent = `${method} model reconstructed locally and verified with SHA-256. Nothing was uploaded.`;
+    stopBeamScanner();
+    window.dispatchEvent(new CustomEvent("spatialdrop:modelreceived", { detail: receivedObjectUrl }));
   }
 
   async function completeTransfer(buffer: ReceiveBuffer) {
     buffer.finalizing = true;
     receiveVerify.textContent = "Checking…";
-    receiveDetail.textContent = "All frames received. Verifying SHA-256 integrity…";
+    receiveDetail.textContent = "Enough independent equations received. Solving, decompressing, and verifying SHA-256…";
     try {
-      const bytes = await assembleBeamTransfer(buffer);
-      if (receivedObjectUrl) URL.revokeObjectURL(receivedObjectUrl);
-      receivedObjectUrl = URL.createObjectURL(new Blob([bytes], { type: "model/gltf-binary" }));
-      receivedViewer.setAttribute("src", receivedObjectUrl);
-      receivedModelStage.hidden = false;
-      receiveVerify.textContent = "Verified";
-      receiveDetail.textContent = "Model reconstructed locally. Nothing was uploaded or fetched from model storage.";
-      stopBeamScanner();
-      window.dispatchEvent(new CustomEvent("spatialdrop:modelreceived", { detail: receivedObjectUrl }));
+      publishReceivedModel(await assembleBeamTransfer(buffer), "Fountain QR");
     } catch (reason) {
       buffer.finalizing = false;
-      receiveVerify.textContent = "Retrying";
-      receiveDetail.textContent = reason instanceof Error ? reason.message : "Verification failed. Keep scanning another loop.";
+      receiveVerify.textContent = "Recovering";
+      receiveDetail.textContent = reason instanceof Error ? reason.message : "Verification failed. Keep scanning recovery frames.";
     }
   }
 
@@ -442,61 +368,47 @@ export function setupBeamLab() {
     if (!frame) return;
     if (!receiveBuffer || receiveBuffer.id !== frame.id) initializeBuffer(frame);
     const buffer = receiveBuffer;
-    if (!buffer || buffer.finalizing || buffer.chunks.has(frame.index)) return;
-    buffer.chunks.set(frame.index, frame.bytes);
-    const count = buffer.chunks.size;
-    const percent = Math.min(100, Math.round((count / buffer.total) * 100));
-    const byteCount = Array.from(buffer.chunks.values()).reduce((sum, chunk) => sum + chunk.length, 0);
+    if (!buffer || buffer.finalizing) return;
+    const advanced = addBeamFrame(buffer, frame);
+    if (!advanced) return;
+    const percent = Math.min(100, Math.round((buffer.rank / buffer.total) * 100));
     receivePercentage.textContent = `${percent}%`;
     receiveProgressBar.style.width = `${percent}%`;
-    receiveFrames.textContent = `${count} / ${buffer.total}`;
-    receiveBytes.textContent = formatBytes(Math.min(byteCount, buffer.size));
-    if (count === buffer.total) void completeTransfer(buffer);
+    receiveFrames.textContent = `${buffer.rank} / ${buffer.total} rank`;
+    receiveBytes.textContent = formatBytes(Math.min(buffer.rank * buffer.fragmentSize, buffer.messageLength));
+    if (buffer.rank === buffer.total) void completeTransfer(buffer);
   }
 
   function scanFrame(timestamp: number) {
     if (!scannerStream) return;
-    const scanInterval = receiveTransport === "color3" ? 140 : 80;
-    if (timestamp - lastScanAt > scanInterval && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+    if (timestamp - lastScanAt > 80 && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
       lastScanAt = timestamp;
-      const maxScanWidth = receiveTransport === "color3" ? 640 : 960;
       const sourceSize = Math.min(video.videoWidth, video.videoHeight);
       const sourceX = (video.videoWidth - sourceSize) / 2;
       const sourceY = (video.videoHeight - sourceSize) / 2;
-      const targetSize = Math.max(1, Math.round(Math.min(sourceSize, maxScanWidth)));
+      const targetSize = Math.max(1, Math.round(Math.min(sourceSize, 960)));
       scanCanvas.width = targetSize;
       scanCanvas.height = targetSize;
       scanContext.drawImage(video, sourceX, sourceY, sourceSize, sourceSize, 0, 0, targetSize, targetSize);
       const image = scanContext.getImageData(0, 0, scanCanvas.width, scanCanvas.height);
-      if (receiveTransport === "color3") {
-        const decoded = new Set<string>();
-        ([0, 1, 2] as const).forEach((channel) => {
-          const code = jsQR(isolateColorChannel(image, channel), image.width, image.height, { inversionAttempts: "dontInvert" });
-          if (code?.data.startsWith(`${PROTOCOL}|`) && !decoded.has(code.data)) {
-            decoded.add(code.data);
-            consumeFrame(code.data);
-          }
-        });
-      } else {
-        const code = jsQR(image.data, image.width, image.height, { inversionAttempts: "dontInvert" });
-        if (code?.data.startsWith(`${PROTOCOL}|`)) consumeFrame(code.data);
-      }
+      const code = jsQR(image.data, image.width, image.height, { inversionAttempts: "dontInvert" });
+      if (code?.data.startsWith(`${BEAM_PROTOCOL}:`)) consumeFrame(code.data);
     }
     scannerAnimation = requestAnimationFrame(scanFrame);
   }
 
-  async function startScanner() {
+  async function startQrScanner() {
     stopBeamScanner();
     lastScanAt = 0;
     setMessage(scannerError);
     try {
       scannerStream = await navigator.mediaDevices.getUserMedia({
         audio: false,
-        video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
       });
       video.srcObject = scannerStream;
       await video.play();
-      document.querySelector<HTMLElement>(".scanner-viewport")?.classList.add("camera-active");
+      scannerViewport.classList.add("camera-active");
       scannerIdle.hidden = true;
       scannerStartButton.hidden = true;
       scannerStopButton.hidden = false;
@@ -507,13 +419,68 @@ export function setupBeamLab() {
     }
   }
 
-  scannerStartButton.addEventListener("click", () => void startScanner());
+  function startCimbarScanner() {
+    stopBeamScanner();
+    setMessage(scannerError);
+    scannerIdle.hidden = true;
+    scannerStartButton.hidden = true;
+    scannerStopButton.hidden = false;
+    scannerViewport.classList.add("cimbar-active");
+    cimbarReceiverFrame.hidden = false;
+    cimbarReceiverFrame.src = cimbarUrl("recv.html");
+    receiveVerify.textContent = "Starting…";
+    receiveDetail.textContent = "Loading the Cimbar WebAssembly camera decoder…";
+  }
+
+  scannerStartButton.addEventListener("click", () => {
+    if (receiveTransport === "cimbar") startCimbarScanner();
+    else void startQrScanner();
+  });
   scannerStopButton.addEventListener("click", stopBeamScanner);
+
+  window.addEventListener("message", (event) => {
+    if (event.origin !== window.location.origin || !event.data) return;
+    if (event.source === cimbarSenderFrame.contentWindow && event.data.type === "spatialdrop:cimbar-ready") {
+      cimbarReady = true;
+      sendCimbarModel();
+      return;
+    }
+    if (event.source !== cimbarReceiverFrame.contentWindow) return;
+    if (event.data.type === "spatialdrop:cimbar-ready") {
+      receiveVerify.textContent = "Scanning";
+      receiveDetail.textContent = "Cimbar is ready. Center the complete color field and hold the camera steady.";
+    } else if (event.data.type === "spatialdrop:cimbar-progress") {
+      const values = Array.isArray(event.data.report) ? event.data.report.filter((value: unknown) => typeof value === "number") as number[] : [];
+      const progress = values.length ? Math.max(...values) : 0;
+      const percent = Math.max(0, Math.min(99, Math.round(progress * 100)));
+      receivePercentage.textContent = `${percent}%`;
+      receiveProgressBar.style.width = `${percent}%`;
+      receiveFrames.textContent = "Fountain stream";
+      receiveBytes.textContent = "zstd payload";
+      receiveVerify.textContent = "Recovering";
+    } else if (event.data.type === "spatialdrop:cimbar-model" && event.data.buffer instanceof ArrayBuffer) {
+      receiveVerify.textContent = "Checking…";
+      receiveDetail.textContent = "Cimbar fountain complete. Verifying the original GLB…";
+      void verifyCimbarModel(String(event.data.name || ""), event.data.buffer)
+        .then((model) => publishReceivedModel(model, "Cimbar"))
+        .catch((reason) => {
+          receiveVerify.textContent = "Failed";
+          receiveDetail.textContent = reason instanceof Error ? reason.message : "The Cimbar payload could not be verified.";
+        });
+    } else if (event.data.type === "spatialdrop:cimbar-error") {
+      setMessage(scannerError, String(event.data.message || "The Cimbar decoder stopped unexpectedly."));
+    }
+  });
+
   window.addEventListener("spatialdrop:modechange", (event) => {
-    if ((event as CustomEvent<string>).detail !== "beam") stopBeam();
+    if ((event as CustomEvent<string>).detail !== "beam") {
+      stopBeam();
+      stopCimbarSender();
+    }
   });
   window.addEventListener("pagehide", () => {
     stopBeam();
+    stopCimbarSender();
     stopBeamScanner();
     if (receivedObjectUrl) URL.revokeObjectURL(receivedObjectUrl);
   });
