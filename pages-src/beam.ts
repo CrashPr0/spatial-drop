@@ -20,7 +20,7 @@ const FRAME_DELAY_MS = 330;
 const QR_RENDER_WIDTH = 720;
 const QR_VERSION = 18;
 const CIMBAR_MODE = "Bu";
-const CIMBAR_FPS = 5;
+const CIMBAR_FPS = 10;
 type BeamTransport = "mono" | "cimbar";
 
 let scannerStream: MediaStream | null = null;
@@ -150,7 +150,7 @@ export function setupBeamLab() {
     transportInputs.forEach((input) => { input.checked = input.value === transport; });
     const isCimbar = transport === "cimbar";
     transportNote.textContent = isCimbar
-      ? "Camera-friendly profile: resilient Bu symbols at 5 FPS, with the receiver locked to the same mode for more decode attempts."
+      ? "Camera-friendly profile: resilient Bu symbols at 10 FPS, with the receiver locked to the same mode for more decode attempts."
       : "Reliable fallback: compressed Base32 frames plus fountain recovery. No exact missed frame is required.";
     transportSpec.textContent = isCimbar ? "Cimbar WASM" : "Fountain QR";
     chunkSpec.textContent = isCimbar ? "zstd + Wirehair" : `${BEAM_CHUNK_BYTES} B + parity`;
@@ -333,7 +333,7 @@ export function setupBeamLab() {
   function updateReceiveTransportUi(updateUrl = false) {
     const isCimbar = receiveTransport === "cimbar";
     receiverTransportButtons.forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.receiveTransport === receiveTransport)));
-    receiveTransportBadge.textContent = isCimbar ? "CIMBAR Bu · 5 FPS" : "FOUNTAIN QR";
+    receiveTransportBadge.textContent = isCimbar ? "CIMBAR Bu · 10 FPS" : "FOUNTAIN QR";
     receiveTransportBadge.classList.toggle("cimbar", isCimbar);
     scannerStartButton.querySelector("span")!.textContent = isCimbar ? "Start Cimbar receiver" : "Start Fountain QR scanner";
     receiveDetail.textContent = isCimbar
@@ -477,7 +477,7 @@ export function setupBeamLab() {
     if (event.source !== cimbarReceiverFrame.contentWindow) return;
     if (event.data.type === "spatialdrop:cimbar-ready") {
       receiveVerify.textContent = "Scanning";
-      receiveDetail.textContent = "Cimbar Bu is ready. Center the complete color field; each frame now holds for 200 ms to improve focus and decoding.";
+      receiveDetail.textContent = "Cimbar Bu is ready. Center the complete color field; each frame holds for 100 ms for faster transfer while preserving repeat exposure.";
     } else if (event.data.type === "spatialdrop:cimbar-progress") {
       const values = Array.isArray(event.data.report) ? event.data.report.filter((value: unknown) => typeof value === "number") as number[] : [];
       const progress = values.length ? Math.max(...values) : 0;
