@@ -13,7 +13,6 @@ type AFrameRuntime = {
 type XR8Runtime = {
   XrConfig: { device: () => { MOBILE: unknown } };
   XrDevice: { isDeviceBrowserCompatible: (options: { allowedDevices: unknown }) => boolean };
-  XrController: { recenter: () => void };
   stop?: () => void;
   pause?: () => void;
 };
@@ -76,7 +75,6 @@ export function setupEighthWall(stopScanner: () => void) {
   const overlay = document.querySelector<HTMLElement>("#beam-ar-overlay")!;
   const root = document.querySelector<HTMLElement>("#beam-ar-root")!;
   const status = document.querySelector<HTMLElement>("#beam-ar-status")!;
-  const recenterButton = document.querySelector<HTMLButtonElement>("#beam-ar-recenter")!;
   const exitButton = document.querySelector<HTMLButtonElement>("#beam-ar-exit")!;
   let modelUrl = "";
 
@@ -115,6 +113,7 @@ export function setupEighthWall(stopScanner: () => void) {
     scene.setAttribute("xrconfig", "cameraDirection: back");
     scene.setAttribute("xrextras-loading", "");
     scene.setAttribute("xrextras-runtime-error", "");
+    scene.setAttribute("xrextras-tap-recenter", "");
     scene.setAttribute("renderer", "colorManagement: true; physicallyCorrectLights: true; antialias: true");
     scene.setAttribute("embedded", "");
 
@@ -166,7 +165,7 @@ export function setupEighthWall(stopScanner: () => void) {
       }
       overlay.hidden = false;
       status.innerHTML = "<i></i>Allow camera access, then move slowly";
-      window.addEventListener("realityready", () => { status.innerHTML = "<i></i>Tracking ready · model placed ahead"; }, { once: true });
+      window.addEventListener("realityready", () => { status.innerHTML = "<i></i>Tracking ready · tap the ground to recenter"; }, { once: true });
       window.addEventListener("realityerror", () => setError(error, "8th Wall could not start the camera. Check camera and motion permissions."), { once: true });
       mountScene();
     } catch (reason) {
@@ -176,7 +175,6 @@ export function setupEighthWall(stopScanner: () => void) {
   }
 
   launchButton.addEventListener("click", () => void startAR());
-  recenterButton.addEventListener("click", () => runtimeWindow.XR8?.XrController.recenter());
   exitButton.addEventListener("click", exitAR);
   window.addEventListener("pagehide", exitAR);
 }

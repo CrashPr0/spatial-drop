@@ -430,6 +430,7 @@
 
     var Module = {};
     Module.onRuntimeInitialized = () => {
+      Recv.setMode('Bu');
       Recv.init_video(video);
       SpatialDropCimbar.ready('receiver');
     };

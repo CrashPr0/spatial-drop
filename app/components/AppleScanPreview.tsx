@@ -25,7 +25,6 @@ declare global {
     XR8?: {
       XrConfig: { device: () => { MOBILE: unknown } };
       XrDevice: { isDeviceBrowserCompatible: (options: { allowedDevices: unknown }) => boolean };
-      XrController: { recenter: () => void };
       stop?: () => void;
       pause?: () => void;
     };
@@ -111,7 +110,7 @@ export function AppleScanPreview() {
   useEffect(() => {
     if (!arActive || !glbUrl || !arRootRef.current || !window.AFRAME) return;
     const root = arRootRef.current;
-    const onReady = () => setArStatus("Tracking ready · model placed ahead");
+    const onReady = () => setArStatus("Tracking ready · tap the ground to recenter");
     const onError = () => setArError("8th Wall could not start the camera. Check camera and motion permissions.");
     window.addEventListener("realityready", onReady, { once: true });
     window.addEventListener("realityerror", onError, { once: true });
@@ -135,6 +134,7 @@ export function AppleScanPreview() {
     scene.setAttribute("xrconfig", "cameraDirection: back");
     scene.setAttribute("xrextras-loading", "");
     scene.setAttribute("xrextras-runtime-error", "");
+    scene.setAttribute("xrextras-tap-recenter", "");
     scene.setAttribute("renderer", "colorManagement: true; physicallyCorrectLights: true; antialias: true");
     scene.setAttribute("embedded", "");
     scene.className = "eighth-wall-scene";
@@ -333,7 +333,7 @@ export function AppleScanPreview() {
 
       <footer><span>SPATIAL DROP · SJSU-INSPIRED XR PROTOTYPE</span><span>This product includes the XR Engine by Niantic Spatial, Inc. · <a href="https://github.com/8thwall/engine/blob/main/LICENSE">License</a></span></footer>
 
-      {arActive && <div className="eighth-wall-overlay"><div ref={arRootRef} className="eighth-wall-root" /><div className="ar-hud"><div><span className="live-dot" />{arStatus}</div><div><button type="button" onClick={() => window.XR8?.XrController.recenter()}>Recenter</button><button type="button" onClick={exitAR}>Exit AR</button></div></div></div>}
+      {arActive && <div className="eighth-wall-overlay"><div ref={arRootRef} className="eighth-wall-root" /><div className="ar-hud"><div><span className="live-dot" />{arStatus}</div><div><button type="button" onClick={exitAR}>Exit AR</button></div></div></div>}
     </main>
   );
 }

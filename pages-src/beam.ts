@@ -19,6 +19,8 @@ import {
 const FRAME_DELAY_MS = 330;
 const QR_RENDER_WIDTH = 720;
 const QR_VERSION = 18;
+const CIMBAR_MODE = "Bu";
+const CIMBAR_FPS = 5;
 type BeamTransport = "mono" | "cimbar";
 
 let scannerStream: MediaStream | null = null;
@@ -134,8 +136,8 @@ export function setupBeamLab() {
   function updateTransferSummary() {
     if (!transfer) return;
     if (transport === "cimbar") {
-      beamFileDetail.textContent = `${formatBytes(transfer.size)} · Cimbar Mode B`;
-      beamTransferSummary.textContent = `${transfer.name} · ${formatBytes(transfer.size)} · zstd compression, Reed–Solomon correction, and a rateless fountain stream at 15 frames per second.`;
+      beamFileDetail.textContent = `${formatBytes(transfer.size)} · Cimbar Mode ${CIMBAR_MODE}`;
+      beamTransferSummary.textContent = `${transfer.name} · ${formatBytes(transfer.size)} · maximum-compatibility symbols, zstd compression, Reed–Solomon correction, and a ${CIMBAR_FPS} FPS fountain stream.`;
     } else {
       const ratio = Math.round((transfer.transportSize / transfer.size) * 100);
       const compression = transfer.compressed ? `${formatBytes(transfer.transportSize)} after gzip (${ratio}%)` : "raw payload";
@@ -148,7 +150,7 @@ export function setupBeamLab() {
     transportInputs.forEach((input) => { input.checked = input.value === transport; });
     const isCimbar = transport === "cimbar";
     transportNote.textContent = isCimbar
-      ? "Fastest path. Uses the embedded Cimbar WebAssembly decoder; flashing imagery warning applies."
+      ? "Camera-friendly profile: resilient Bu symbols at 5 FPS, with the receiver locked to the same mode for more decode attempts."
       : "Reliable fallback: compressed Base32 frames plus fountain recovery. No exact missed frame is required.";
     transportSpec.textContent = isCimbar ? "Cimbar WASM" : "Fountain QR";
     chunkSpec.textContent = isCimbar ? "zstd + Wirehair" : `${BEAM_CHUNK_BYTES} B + parity`;
@@ -188,10 +190,10 @@ export function setupBeamLab() {
     cimbarSenderFrame.contentWindow?.postMessage({
       type: "spatialdrop:cimbar-send",
       file: createCimbarFile(transfer),
-      mode: "B",
-      fps: 15,
+      mode: CIMBAR_MODE,
+      fps: CIMBAR_FPS,
     }, window.location.origin);
-    beamFrameLabel.textContent = "CIMBAR MODE B · 15 FPS";
+    beamFrameLabel.textContent = `CIMBAR MODE ${CIMBAR_MODE} · ${CIMBAR_FPS} FPS`;
     beamLoopLabel.textContent = "FOUNTAIN STREAM";
   }
 
@@ -219,7 +221,7 @@ export function setupBeamLab() {
       sequence = 0;
       updateTransferSummary();
       beamStartButton.disabled = false;
-      beamStartButton.querySelector("span")!.textContent = transport === "cimbar" ? "Start Cimbar Turbo" : "Start fountain beam";
+      beamStartButton.querySelector("span")!.textContent = transport === "cimbar" ? "Start Cimbar Reliable" : "Start fountain beam";
       if (transport === "mono") {
         beamCanvas.hidden = false;
         await renderCurrentFrame();
@@ -249,7 +251,7 @@ export function setupBeamLab() {
     transport = input.value === "cimbar" ? "cimbar" : "mono";
     sequence = 0;
     beamCanvas.hidden = transport === "cimbar";
-    beamStartButton.querySelector("span")!.textContent = transport === "cimbar" ? "Start Cimbar Turbo" : "Start fountain beam";
+    beamStartButton.querySelector("span")!.textContent = transport === "cimbar" ? "Start Cimbar Reliable" : "Start fountain beam";
     updateTransportUi();
     if (transfer && transport === "mono") void renderCurrentFrame();
   }));
@@ -318,7 +320,7 @@ export function setupBeamLab() {
   const receiveTransport: BeamTransport = new URL(window.location.href).searchParams.get("beam") === "cimbar" ? "cimbar" : "mono";
 
   if (receiveTransport === "cimbar") {
-    receiveTransportBadge.textContent = "CIMBAR TURBO";
+    receiveTransportBadge.textContent = "CIMBAR Bu · 5 FPS";
     receiveTransportBadge.classList.add("cimbar");
     scannerStartButton.querySelector("span")!.textContent = "Start Cimbar receiver";
     receiveDetail.textContent = "Cimbar receiver armed. It accepts fountain frames in any order and corrects damaged symbols.";
@@ -448,7 +450,7 @@ export function setupBeamLab() {
     if (event.source !== cimbarReceiverFrame.contentWindow) return;
     if (event.data.type === "spatialdrop:cimbar-ready") {
       receiveVerify.textContent = "Scanning";
-      receiveDetail.textContent = "Cimbar is ready. Center the complete color field and hold the camera steady.";
+      receiveDetail.textContent = "Cimbar Bu is ready. Center the complete color field; each frame now holds for 200 ms to improve focus and decoding.";
     } else if (event.data.type === "spatialdrop:cimbar-progress") {
       const values = Array.isArray(event.data.report) ? event.data.report.filter((value: unknown) => typeof value === "number") as number[] : [];
       const progress = values.length ? Math.max(...values) : 0;

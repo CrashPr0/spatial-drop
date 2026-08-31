@@ -61,8 +61,8 @@
   window.addEventListener("message", function (event) {
     if (event.origin !== parentOrigin || event.source !== window.parent || !event.data) return;
     if (role === "sender" && event.data.type === "spatialdrop:cimbar-send" && event.data.file instanceof File) {
-      Main.setMode(event.data.mode || "B");
-      Main.setFPS(event.data.fps || 15);
+      Main.setMode(event.data.mode || "Bu");
+      Main.setFPS(event.data.fps || 5);
       Main.importFile(event.data.file);
     } else if (role === "sender" && event.data.type === "spatialdrop:cimbar-pause") {
       Main.togglePause(Boolean(event.data.paused));
