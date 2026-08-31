@@ -178,7 +178,20 @@ export function stopBeamScanner() {
   scannerStream?.getTracks().forEach((track) => track.stop());
   scannerStream = null;
   const video = document.querySelector<HTMLVideoElement>("#beam-video");
-  if (video) video.srcObject = null;
+  const scanCanvas = document.querySelector<HTMLCanvasElement>("#beam-scan-canvas");
+  const viewport = document.querySelector<HTMLElement>(".scanner-viewport");
+  if (video) {
+    video.pause();
+    video.srcObject = null;
+    video.removeAttribute("src");
+    video.load();
+  }
+  if (scanCanvas) {
+    scanCanvas.width = 1;
+    scanCanvas.height = 1;
+    scanCanvas.getContext("2d")?.clearRect(0, 0, 1, 1);
+  }
+  viewport?.classList.remove("camera-active");
   const startButton = document.querySelector<HTMLButtonElement>("#scanner-start-button");
   const stopButton = document.querySelector<HTMLButtonElement>("#scanner-stop-button");
   const idle = document.querySelector<HTMLElement>("#scanner-idle");
@@ -447,10 +460,13 @@ export function setupBeamLab() {
     if (timestamp - lastScanAt > scanInterval && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
       lastScanAt = timestamp;
       const maxScanWidth = receiveTransport === "color3" ? 640 : 960;
-      const scale = Math.min(1, maxScanWidth / video.videoWidth);
-      scanCanvas.width = Math.max(1, Math.round(video.videoWidth * scale));
-      scanCanvas.height = Math.max(1, Math.round(video.videoHeight * scale));
-      scanContext.drawImage(video, 0, 0, scanCanvas.width, scanCanvas.height);
+      const sourceSize = Math.min(video.videoWidth, video.videoHeight);
+      const sourceX = (video.videoWidth - sourceSize) / 2;
+      const sourceY = (video.videoHeight - sourceSize) / 2;
+      const targetSize = Math.max(1, Math.round(Math.min(sourceSize, maxScanWidth)));
+      scanCanvas.width = targetSize;
+      scanCanvas.height = targetSize;
+      scanContext.drawImage(video, sourceX, sourceY, sourceSize, sourceSize, 0, 0, targetSize, targetSize);
       const image = scanContext.getImageData(0, 0, scanCanvas.width, scanCanvas.height);
       if (receiveTransport === "color3") {
         const decoded = new Set<string>();
@@ -471,6 +487,7 @@ export function setupBeamLab() {
 
   async function startScanner() {
     stopBeamScanner();
+    lastScanAt = 0;
     setMessage(scannerError);
     try {
       scannerStream = await navigator.mediaDevices.getUserMedia({
@@ -479,6 +496,7 @@ export function setupBeamLab() {
       });
       video.srcObject = scannerStream;
       await video.play();
+      document.querySelector<HTMLElement>(".scanner-viewport")?.classList.add("camera-active");
       scannerIdle.hidden = true;
       scannerStartButton.hidden = true;
       scannerStopButton.hidden = false;
