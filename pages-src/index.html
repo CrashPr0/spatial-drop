@@ -3,29 +3,32 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#171713" />
-    <meta name="description" content="Preview a GLB in 3D and AR, or create a shareable AR link from a publicly hosted model." />
-    <meta property="og:title" content="Spatial Drop — Put your model in the room" />
-    <meta property="og:description" content="One GLB. One QR. No app." />
-    <meta property="og:image" content="./og.png" />
-    <title>Spatial Drop — GitHub Pages Preview</title>
+    <meta name="theme-color" content="#0055A2" />
+    <meta name="description" content="An SJSU-inspired spatial computing prototype for previewing 3D models in the browser and in AR." />
+    <meta property="og:title" content="Spatial Drop — Bring ideas into the room" />
+    <meta property="og:description" content="Preview a 3D model, create a QR link, and place it in your space." />
+    <meta property="og:image" content="./og-sjsu.png" />
+    <title>Spatial Drop — SJSU XR Prototyping Lab</title>
   </head>
   <body>
     <main class="shell">
       <header>
-        <a class="brand" href="./"><b>S/</b><span>SPATIAL DROP</span></a>
-        <span class="pill">GITHUB PAGES PREVIEW</span>
+        <a class="brand" href="./" aria-label="Spatial Drop home">
+          <b>SJSU</b>
+          <span><strong>SPATIAL DROP</strong><small>XR PROTOTYPING LAB</small></span>
+        </a>
+        <span class="pill">SPARTAN INNOVATION · BROWSER AR</span>
       </header>
 
       <section class="intro">
-        <p class="eyebrow">3D → URL → REAL SPACE</p>
-        <h1>Put your model<br />in the room.</h1>
-        <p class="lede">Preview a GLB immediately—or point to a hosted model and create a QR-powered AR page.</p>
+        <p class="eyebrow">SAN JOSÉ STATE · SPATIAL COMPUTING</p>
+        <h1>Bring ideas<br />into the room.</h1>
+        <p class="lede">A fast, browser-based path from a 3D model to an interactive preview and QR-powered AR experience.</p>
       </section>
 
       <section class="workspace">
         <div class="controls">
-          <div class="step"><em>01</em><div><h2>Choose a model</h2><p>Binary glTF · 15 MB maximum</p></div></div>
+          <div class="step"><em>01</em><div><h2>Choose a model</h2><p>Binary glTF · 15 MB maximum · processed locally</p></div></div>
 
           <div id="drop-zone" class="drop-zone" role="button" tabindex="0">
             <input id="file-input" type="file" accept=".glb,model/gltf-binary" hidden />
@@ -61,7 +64,7 @@
 
           <p id="error" class="error" role="alert" hidden></p>
           <button id="share-button" class="primary" type="button" disabled><span>Create share link</span><span>→</span></button>
-          <p class="storage-note"><b>Pages mode:</b> local files stay on this device. Runtime uploads need a storage backend.</p>
+          <p class="storage-note"><b>Privacy first:</b> local files remain on this device. A public HTTPS model URL is only needed to create a cross-device QR link.</p>
         </div>
 
         <div class="preview">
@@ -77,11 +80,11 @@
       </section>
 
       <section id="share-panel" class="share-panel" hidden>
-        <div><p class="eyebrow">SHARE LINK READY</p><h2>Scan to put it<br />in the room.</h2><p id="share-url"></p><div class="actions"><button id="copy-button" type="button">Copy link</button><a id="open-link" href="#">Open AR page ↗</a></div></div>
-        <div class="qr"><canvas id="qr-canvas"></canvas><strong>SCAN TO PLACE</strong></div>
+        <div><p class="eyebrow">SHARE LINK READY</p><h2>From screen<br />to space.</h2><p id="share-url"></p><div class="actions"><button id="copy-button" type="button">Copy link</button><a id="open-link" href="#">Open AR page ↗</a></div></div>
+        <div class="qr"><canvas id="qr-canvas"></canvas><strong>SCAN TO PLACE · SPATIAL DROP</strong></div>
       </section>
 
-      <footer><span>SPATIAL DROP / STATIC PREVIEW</span><span>GLB · QUICK LOOK · SCENE VIEWER · WEBXR</span></footer>
+      <footer><span>SPATIAL DROP · SJSU-INSPIRED XR PROTOTYPE</span><span>GLB · QUICK LOOK · SCENE VIEWER · WEBXR</span></footer>
     </main>
     <script type="module" src="/app.ts"></script>
   </body>

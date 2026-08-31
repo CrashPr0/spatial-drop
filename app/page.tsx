@@ -1,12 +1,12 @@
 import type { Metadata } from "next";
-import { UploadStudio } from "./components/UploadStudio";
+import { AppleScanPreview } from "./components/AppleScanPreview";
 
 export const metadata: Metadata = {
-  title: "Spatial Drop — Publish a model into the room",
+  title: "Spatial Drop — SJSU XR Prototyping Lab",
   description:
-    "Upload a GLB, publish a link, and let anyone place it in AR from a QR code.",
+    "Preview an Apple Object Capture USDZ in the browser and place it with 8th Wall WebAR.",
 };
 
 export default function Home() {
-  return <UploadStudio />;
+  return <AppleScanPreview />;
 }

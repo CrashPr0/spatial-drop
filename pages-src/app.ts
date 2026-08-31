@@ -92,7 +92,7 @@ shareButton.addEventListener("click", async () => {
     const shareUrl = createShareUrl();
     document.querySelector("#share-url")!.textContent = shareUrl;
     document.querySelector<HTMLAnchorElement>("#open-link")!.href = shareUrl;
-    await QRCode.toCanvas(document.querySelector<HTMLCanvasElement>("#qr-canvas")!, shareUrl, { width: 360, margin: 2, color: { dark: "#171713", light: "#fffef8" }, errorCorrectionLevel: "H" });
+    await QRCode.toCanvas(document.querySelector<HTMLCanvasElement>("#qr-canvas")!, shareUrl, { width: 360, margin: 2, color: { dark: "#0055A2", light: "#ffffff" }, errorCorrectionLevel: "H" });
     sharePanel.hidden = false;
     sharePanel.scrollIntoView({ behavior: "smooth", block: "center" });
   } catch (reason) {

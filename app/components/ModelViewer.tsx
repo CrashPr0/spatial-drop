@@ -4,6 +4,7 @@ import { createElement, useEffect } from "react";
 
 type ModelViewerProps = {
   src: string;
+  iosSrc?: string;
   alt: string;
   placement?: "floor" | "wall";
   resizable?: boolean;
@@ -13,6 +14,7 @@ type ModelViewerProps = {
 
 export function ModelViewer({
   src,
+  iosSrc,
   alt,
   placement = "floor",
   resizable = true,
@@ -27,6 +29,7 @@ export function ModelViewer({
     "model-viewer",
     {
       src,
+      ...(iosSrc ? { "ios-src": iosSrc } : {}),
       alt,
       class: className,
       ar: true,

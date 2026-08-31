@@ -1,9 +1,9 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Geist_Mono, Nunito_Sans } from "next/font/google";
 import { headers } from "next/headers";
 import "./globals.css";
 
-const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
+const nunitoSans = Nunito_Sans({ variable: "--font-nunito-sans", subsets: ["latin"] });
 const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
 
 export async function generateMetadata(): Promise<Metadata> {
@@ -13,18 +13,18 @@ export async function generateMetadata(): Promise<Metadata> {
   return {
     metadataBase: new URL(`${protocol}://${host}`),
     title: { default: "Spatial Drop", template: "%s" },
-    description: "Upload a 3D model, share a QR code, and place it in augmented reality.",
+    description: "An SJSU-inspired spatial computing prototype for previewing 3D models in the browser and in AR.",
     openGraph: {
-      title: "Spatial Drop — Put your model in the room",
-      description: "One GLB. One QR code. No app download.",
+      title: "Spatial Drop — Bring ideas into the room",
+      description: "Preview a 3D model, create a QR link, and place it in your space.",
       type: "website",
-      images: [{ url: "/og.png", width: 1728, height: 910, alt: "Spatial Drop — put your model in the room" }],
+      images: [{ url: "/og-sjsu.png", width: 1536, height: 1024, alt: "Spatial Drop — bring ideas into the room" }],
     },
     twitter: {
       card: "summary_large_image",
-      title: "Spatial Drop — Put your model in the room",
-      description: "One GLB. One QR code. No app download.",
-      images: ["/og.png"],
+      title: "Spatial Drop — Bring ideas into the room",
+      description: "Preview a 3D model, create a QR link, and place it in your space.",
+      images: ["/og-sjsu.png"],
     },
   };
 }
@@ -32,7 +32,7 @@ export async function generateMetadata(): Promise<Metadata> {
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en">
-      <body className={`${geistSans.variable} ${geistMono.variable}`}>{children}</body>
+      <body className={`${nunitoSans.variable} ${geistMono.variable}`}>{children}</body>
     </html>
   );
 }
