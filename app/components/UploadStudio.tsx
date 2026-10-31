@@ -58,11 +58,15 @@ export function UploadStudio() {
     setPublished(null);
     if (!candidate) return;
     if (!candidate.name.toLowerCase().endsWith(".glb")) {
-      setError("Please choose a binary glTF file ending in .glb.");
+      setError("This file type is not supported. Choose a binary glTF model ending in .glb.");
       return;
     }
     if (candidate.size > MAX_BYTES) {
-      setError("That model is over 15 MB. Optimize it, then try again.");
+      setError(`This model exceeds the ${formatBytes(MAX_BYTES)} limit. Reduce its size, then try again.`);
+      return;
+    }
+    if (candidate.size === 0) {
+      setError("This file is empty. Export your model again, then choose the new .glb file.");
       return;
     }
     setFile(candidate);
@@ -85,9 +89,15 @@ export function UploadStudio() {
       form.append("title", title.trim() || "Untitled model");
       form.append("placement", placement);
       form.append("resizable", String(resizable));
-      const response = await fetch("/api/models", { method: "POST", body: form });
-      const payload = (await response.json()) as { id?: string; error?: string };
-      if (!response.ok || !payload.id) throw new Error(payload.error || "Publishing failed.");
+      const response = await fetch("/api/models", { method: "POST", body: form }).catch(() => {
+        throw new Error("We couldn't reach the server. Check your internet connection, then try publishing again.");
+      });
+      const payload = (await response.json().catch(() => null)) as { id?: string; error?: string } | null;
+      if (!response.ok || !payload?.id) {
+        throw new Error(
+          (response.status < 500 && payload?.error) || "The server couldn't publish your model. Please try again in a moment.",
+        );
+      }
 
       const viewUrl = `${window.location.origin}/view/${payload.id}`;
       setPublished({
@@ -97,7 +107,7 @@ export function UploadStudio() {
         modelUrl: `${window.location.origin}/api/models/${payload.id}/file`,
       });
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Publishing failed. Please try again.");
+      setError(reason instanceof Error ? reason.message : "We couldn't publish your model. Please try again.");
     } finally {
       setPublishing(false);
     }
