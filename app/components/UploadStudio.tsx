@@ -33,7 +33,19 @@ export function UploadStudio() {
   const [publishing, setPublishing] = useState(false);
   const [published, setPublished] = useState<PublishedModel | null>(null);
   const [qrDataUrl, setQrDataUrl] = useState("");
+  const [copyStatus, setCopyStatus] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const linkRef = useRef<HTMLSpanElement>(null);
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mounted = useRef(true);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      if (copyTimer.current) clearTimeout(copyTimer.current);
+    };
+  }, []);
 
   const previewUrl = useMemo(() => (file ? URL.createObjectURL(file) : ""), [file]);
 
@@ -115,7 +127,32 @@ export function UploadStudio() {
 
   async function copyLink() {
     if (!published) return;
-    await navigator.clipboard.writeText(published.viewUrl);
+    let copied = false;
+    try {
+      await navigator.clipboard.writeText(published.viewUrl);
+      copied = true;
+    } catch {
+      // Selecting the visible URL also leaves it ready for manual copying.
+      if (!mounted.current) return;
+      try {
+        const selection = window.getSelection();
+        if (selection && linkRef.current) {
+          const range = document.createRange();
+          range.selectNodeContents(linkRef.current);
+          selection.removeAllRanges();
+          selection.addRange(range);
+          copied = document.execCommand("copy");
+        }
+      } catch {
+        copied = false;
+      }
+    }
+    if (!mounted.current) return;
+    if (copyTimer.current) clearTimeout(copyTimer.current);
+    setCopyStatus(copied ? "Copied!" : "Please copy the link above manually.");
+    if (copied) {
+      copyTimer.current = setTimeout(() => setCopyStatus(""), 2000);
+    }
   }
 
   function downloadQr() {
@@ -229,7 +266,8 @@ export function UploadStudio() {
             <p className="eyebrow">PUBLISHED</p>
             <h2>Your model is ready<br />for the real world.</h2>
             <p>Scan with an iPhone or Android camera, then tap “View in your space.”</p>
-            <div className="link-box"><span>{published.viewUrl}</span><button type="button" onClick={copyLink}>Copy link</button></div>
+            <div className="link-box"><span ref={linkRef}>{published.viewUrl}</span><button type="button" onClick={copyLink}>{copyStatus === "Copied!" ? "Copied!" : "Copy link"}</button></div>
+            <p role="status" aria-live="polite" aria-atomic="true">{copyStatus}</p>
             <div className="success-actions">
               <a href={published.viewUrl}>Open AR page ↗</a>
               <button type="button" onClick={downloadQr}>Download QR</button>

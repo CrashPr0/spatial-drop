@@ -102,7 +102,51 @@ shareButton.addEventListener("click", async () => {
   }
 });
 
-document.querySelector("#copy-button")!.addEventListener("click", async () => navigator.clipboard.writeText(createShareUrl()));
+const copyButton = document.querySelector<HTMLButtonElement>("#copy-button")!;
+const shareUrlText = document.querySelector<HTMLElement>("#share-url")!;
+const copyStatus = document.createElement("p");
+copyStatus.setAttribute("role", "status");
+copyStatus.setAttribute("aria-live", "polite");
+copyStatus.setAttribute("aria-atomic", "true");
+copyButton.closest(".actions")!.after(copyStatus);
+let copyTimer: ReturnType<typeof setTimeout> | undefined;
+
+copyButton.addEventListener("click", async () => {
+  let copied = false;
+  try {
+    await navigator.clipboard.writeText(shareUrlText.textContent || "");
+    copied = true;
+  } catch {
+    // Keep the displayed link selected if automatic copying is unavailable.
+    try {
+      const selection = window.getSelection();
+      if (selection) {
+        const range = document.createRange();
+        range.selectNodeContents(shareUrlText);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        copied = document.execCommand("copy");
+      }
+    } catch {
+      copied = false;
+    }
+  }
+  clearTimeout(copyTimer);
+  copyButton.textContent = copied ? "Copied!" : "Copy link";
+  copyStatus.textContent = copied ? "Copied!" : "Please copy the link above manually.";
+  if (copied) {
+    copyTimer = setTimeout(() => {
+      copyButton.textContent = "Copy link";
+      copyStatus.textContent = "";
+    }, 2000);
+  }
+});
+
+window.addEventListener("pagehide", () => {
+  clearTimeout(copyTimer);
+  copyButton.textContent = "Copy link";
+  copyStatus.textContent = "";
+});
 
 const initial = new URLSearchParams(window.location.search);
 const initialModel = initial.get("model");
