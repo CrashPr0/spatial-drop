@@ -40,6 +40,8 @@ export type MeshWorkerMessage =
     type: "done";
     mesh: { positions: Float32Array; normals: Float32Array; indices: Uint32Array; stats: ReturnType<typeof buildScanMesh>["stats"] };
     atlas: Omit<ReturnType<typeof bakeTextureAtlas>, "texelPoints" | "texelNormals" | "texelUsed">;
+    /** milliseconds per step, for profiling */
+    timings: { mesh: number; atlas: number; photos: number };
   }
   | { type: "error"; message: string };
 
@@ -68,6 +70,7 @@ const post = (message: MeshWorkerMessage, transfer: Transferable[] = []) => self
 
 self.onmessage = async ({ data: job }: MessageEvent<MeshJob>) => {
   try {
+    const started = performance.now();
     post({ type: "progress", stage: "mesh", done: 0, total: 1 });
     const mesh = buildScanMesh(job.splat, job.cameras, {
       ...job.options,
@@ -78,7 +81,9 @@ self.onmessage = async ({ data: job }: MessageEvent<MeshJob>) => {
         width: meta.featureWidth, height: meta.featureHeight,
       })),
     });
+    const meshed = performance.now();
     const atlas = bakeTextureAtlas(mesh, { size: job.textureSize });
+    const baked = performance.now();
     const views = photoViews(job.viewMetas, job.photos);
     if (views.length) {
       // the photos hold far more detail than the splat's colors
@@ -89,7 +94,10 @@ self.onmessage = async ({ data: job }: MessageEvent<MeshJob>) => {
     // the per-texel surface data stays here; the page only needs the painted atlas
     const painted = { size: atlas.size, cell: atlas.cell, pixels: atlas.pixels, indices: atlas.indices, positions: atlas.positions, normals: atlas.normals, uvs: atlas.uvs };
     post(
-      { type: "done", mesh: { positions: mesh.positions, normals: mesh.normals, indices: mesh.indices, stats: mesh.stats }, atlas: painted },
+      {
+        type: "done", mesh: { positions: mesh.positions, normals: mesh.normals, indices: mesh.indices, stats: mesh.stats }, atlas: painted,
+        timings: { mesh: Math.round(meshed - started), atlas: Math.round(baked - meshed), photos: Math.round(performance.now() - baked) },
+      },
       [mesh.positions.buffer, mesh.normals.buffer, mesh.indices.buffer, painted.pixels.buffer, painted.indices.buffer,
         painted.positions.buffer, painted.normals.buffer, painted.uvs.buffer],
     );

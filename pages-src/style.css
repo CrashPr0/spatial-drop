@@ -383,6 +383,8 @@ footer a { color: inherit; text-underline-offset: 3px; }
 .scan-model-stage { height: 360px; position: relative; margin-top: 0; }
 .scan-model-stage .ar-button { bottom: 18px; }
 .scan-mesh-stats { margin: 0 0 18px; color: var(--muted); font: 700 10px/1.5 monospace; letter-spacing: .04em; }
+.scan-timings { margin-top: -12px; }
+.scan-timings:empty { display: none; }
 .scan-mesh-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 0 18px; align-items: end; }
 .scan-mesh-controls select { width: 100%; border: 1px solid var(--line); border-radius: 0; padding: 12px; background: white; color: var(--ink); font: inherit; font-size: 14px; }
 .scan-mesh-controls .field { margin-bottom: 12px; }

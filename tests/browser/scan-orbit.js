@@ -59,6 +59,8 @@ window.makeOrbit = async function makeOrbit({ build = true } = {}) {
     files.push(new File([blob], `orbit_${String(files.length).padStart(2, '0')}.jpg`, { type: 'image/jpeg' }));
   }
   window.__orbitFiles = files;
+  // the scan list accumulates: start from an empty one so repeat runs do not stack duplicates
+  document.querySelector('#scan-clear-button').click();
   const dt = new DataTransfer(); files.forEach((f) => dt.items.add(f));
   const input = document.querySelector('#scan-file-input'); input.files = dt.files; input.dispatchEvent(new Event('change'));
   window.__t0 = performance.now();
@@ -221,4 +223,31 @@ window.heldOutPsnr = async (saved, files, testNames = ['orbit_03.jpg', 'orbit_14
     scores.push(+(10 * Math.log10(255 * 255 / (se / n))).toFixed(2));
   }
   return scores;
+};
+
+/** Retrain an already solved (and cropped) scan session with other settings and
+ *  score the result: { seconds, splats, shape, psnr }. Needs a finished build in
+ *  this tab (window.spatialDropScan) and the orbit photos (__orbitFiles). */
+window.trainVariant = async ({ maxIters = 7000, initTarget, trainer = {} } = {}) => {
+  const { createSession } = await import('/vendor/splat/index.js');
+  const M = await import('/scan-mesh.ts');
+  const base = window.spatialDropScan;
+  const session = createSession({ maxIters, holdout: -1, evalHoldEvery: 1e9, ...(initTarget ? { initTarget } : {}), trainer: { maxSplats: 600000, capMult: 8, ...trainer } });
+  session.useFrames(base.session.frames);
+  session.useReconstruction({ ...base.session.recon, cams: base.session.recon.cams.map((c) => ({ ...c })), points: base.session.recon.points.slice() });
+  const t0 = performance.now();
+  await session.seed();
+  const seeded = performance.now();
+  await new Promise((resolve) => { session.on('event', (e) => { if (e.kind === 'train-complete') resolve(); }); session.start(); });
+  const trained = performance.now();
+  const raw = await session.exportRawState();
+  const saved = { data: Float32Array.from(raw.data.subarray(0, raw.n * 16)), n: raw.n, dc: session.trainer.dcMode, cameras: base.cameras, viewMetas: base.viewMetas };
+  session.dispose();
+  const mesh = M.buildScanMesh(saved, saved.cameras, { resolution: 104, heightMeters: 0.41, targetTriangles: 15000, views: window.cameraModels(saved.viewMetas) });
+  const psnr = await window.heldOutPsnr(saved, window.__orbitFiles);
+  return {
+    maxIters, initTarget: initTarget ?? 'default',
+    seedSeconds: +((seeded - t0) / 1000).toFixed(1), trainSeconds: +((trained - seeded) / 1000).toFixed(1), splats: raw.n,
+    shapeMeanMm: window.shapeError(mesh).meanMm, psnrMean: +(psnr.reduce((a, b) => a + b, 0) / psnr.length).toFixed(2),
+  };
 };

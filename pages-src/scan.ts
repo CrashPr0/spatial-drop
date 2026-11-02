@@ -129,6 +129,7 @@ export function setupScanLab() {
   const rebuildButton = $<HTMLButtonElement>("#scan-rebuild-button");
   const viewer = $<HTMLElement & { src: string }>("#scan-viewer");
   const meshStats = $("#scan-mesh-stats");
+  const timingsLine = $("#scan-timings");
   const studioButton = $<HTMLButtonElement>("#scan-studio-button");
   const glbButton = $<HTMLButtonElement>("#scan-glb-button");
   const plyButton = $<HTMLButtonElement>("#scan-ply-button");
@@ -150,6 +151,9 @@ export function setupScanLab() {
   let usdzBlob: Blob | null = null;
   let usdzUrl = "";
   let startedAt = 0;
+  // where this device spends its time, shown with the model so phone runs can be compared
+  const phases = { solved: 0, trainStart: 0, trained: 0, modelStart: 0 };
+  const seconds = (ms: number) => `${(ms / 1000).toFixed(1)} s`;
   let clockTimer = 0;
   let lookTimer = 0;
 
@@ -336,16 +340,30 @@ export function setupScanLab() {
 
     const { createSession, focalPxFrom35, solveTierOpts } = await loadSplat();
     const phone = isPhone();
-    const maxIters = phone ? 3500 : 7000;
+    // The splat only has to get the shape right (color comes from the photos), and
+    // that settles early. Measured on the synthetic orbit, three runs each:
+    // 2000 steps from 20k splats: 8.5-9.1 s, 2.7-3.1 mm, 25.1-25.2 dB held out;
+    // 7000 steps from the 60k default: 60-68 s, 3.0-4.2 mm, 24.1-24.3 dB.
+    const maxIters = 2000;
     const created = createSession({
       maxIters,
       holdout: -1,
       evalHoldEvery: 1e9,
-      ...(phone ? { initTarget: 60000, lowMem: true } : {}),
+      initTarget: 20000,
+      ...(phone ? { lowMem: true } : {}),
       sfm: { ...solveTierOpts("quick"), uiYield: true, ...(phone ? { workers: 3 } : {}) },
       trainer: { maxSplats: phone ? 300000 : 600000, capMult: 8 },
+      // the browser harness (tests/browser/scan-orbit.js) tries other settings through this
+      ...(import.meta.env.DEV ? (window as { spatialDropSessionOverrides?: object }).spatialDropSessionOverrides : {}),
     });
     session = created;
+    // dev builds keep splat.js's own timing log for the browser harness
+    const devLog: [number, string][] | null = import.meta.env.DEV ? [] : null;
+    if (devLog) {
+      Object.assign(window, { spatialDropLog: devLog });
+      created.on("log", (message: string) => devLog.push([Math.round(performance.now() - startedAt), message]));
+    }
+    const mark = (label: string) => devLog?.push([Math.round(performance.now() - startedAt), `[scan] ${label}`]);
     created.on("stage", (event: { stage: string; done: number; total: number }) => {
       const span = STAGE_SPANS[event.stage];
       if (!span || event.stage === "train") return;
@@ -394,12 +412,16 @@ export function setupScanLab() {
         return [camera.imgIdx, { featureWidth: frame.fw, featureHeight: frame.fh, cx: camera.cx, cy: camera.cy }];
       }));
       // train on the object, not the room: crop every photo to the subject's region
+      mark("solved");
+      phases.solved = performance.now();
       const region = subjectCylinder(
         created.recon.points.map((point: { X: number[] }) => point.X as Vec3),
         orbitCameras(created.recon.cams),
       );
       cropToSubject(created.frames, created.recon.cams, region);
+      mark("cropped");
       await created.seed();
+      mark("seeded");
       if (session !== created) return;
       const first = created.trainer.camMeta[0];
       liveCanvas.width = first.w;
@@ -417,6 +439,8 @@ export function setupScanLab() {
         created.view.lookThrough(look);
       }, 2500);
       setState("training");
+      mark("training");
+      phases.trainStart = performance.now();
       created.start();
     } catch (reason) {
       stopClock();
@@ -432,6 +456,7 @@ export function setupScanLab() {
     const current = session;
     if (!current || state !== "training") return;
     window.clearInterval(lookTimer);
+    phases.trained = performance.now();
     setState("meshing");
     setProgress("Saving the splat", 97, "Reading the trained splat back from the GPU…");
     try {
@@ -466,11 +491,12 @@ export function setupScanLab() {
     meshJob?.abort();
     const job = new AbortController();
     meshJob = job;
+    phases.modelStart = performance.now();
     setState("meshing");
     setProgress("Building the AR mesh", 98, "Carving a solid surface out of the splat…");
     try {
       const heightCm = Math.min(500, Math.max(1, Number(heightInput.value) || 30));
-      const { mesh, atlas } = await runMeshWorker({
+      const { mesh, atlas, timings } = await runMeshWorker({
         // a copy: the worker's buffers are gone once it finishes, and rebuilds need the splat again
         splat: { data: splat.data.slice(), n: splat.n, dc: splat.dc },
         cameras,
@@ -490,6 +516,7 @@ export function setupScanLab() {
           setProgress("Painting the texture", 98.5 + done / total, `Projecting photo ${Math.min(done + 1, total)} of ${total} onto the surface…`);
         }
       }, job.signal);
+      if (import.meta.env.DEV) Object.assign(window, { spatialDropMeshTimings: timings });
       const exports = await exportModels(mesh, atlas);
       if (meshJob !== job) return;
       glbBlob = exports.glb;
@@ -503,6 +530,12 @@ export function setupScanLab() {
       viewer.setAttribute("src", glbUrl);
       const [w, h, d] = mesh.stats.sizeMeters.map((value) => Math.round(value * 100));
       meshStats.textContent = `${mesh.stats.triangles.toLocaleString()} triangles · ${w} × ${h} × ${d} cm · GLB ${formatBytes(glbBlob.size)} · USDZ ${formatBytes(usdzBlob.size)}${mesh.stats.groundRemoved ? " · ground removed" : ""}`;
+      const modelTime = performance.now() - phases.modelStart;
+      timingsLine.textContent = phases.trained
+        ? `Solved in ${seconds(phases.solved - startedAt)} · trained in ${seconds(phases.trained - phases.trainStart)} · model in ${seconds(modelTime)} · ${seconds(performance.now() - startedAt)} total on this device`
+        : `Model rebuilt in ${seconds(modelTime)}`;
+      // later rebuilds report only themselves
+      phases.trained = 0;
       meshPanel.hidden = false;
       setProgress("Model ready", 100, "Your scan is a local GLB now. Place it in AR, open it in Studio, or download it.");
       window.dispatchEvent(new CustomEvent("spatialdrop:scanready", { detail: glbUrl }));
