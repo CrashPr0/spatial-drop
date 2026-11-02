@@ -1,6 +1,7 @@
 import { BufferAttribute, BufferGeometry, CanvasTexture, LinearFilter, Mesh, MeshStandardMaterial, SRGBColorSpace } from "three";
 import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
 import { bakeTextureAtlas, buildScanMesh, type ScanCamera, type ScanMesh, type Vec3 } from "./scan-mesh";
+import { projectPhotos, type PhotoView } from "./scan-texture";
 import { buildUsdz } from "./scan-usdz";
 
 // the reconstruction library (~1 MB) loads only when someone actually scans
@@ -32,6 +33,47 @@ const STAGE_SPANS: Record<string, [number, number]> = {
 
 // triangle budgets per detail level; texture detail is baked separately
 const DETAIL_TRIANGLES: Record<string, number> = { light: 6000, standard: 15000, high: 40000 };
+
+// photos are decoded at most this large for texturing
+const TEXTURE_PHOTO_MAX = 1600;
+
+/** Camera data the texture projector needs, without the photo itself. */
+interface ViewMeta {
+  name: string;
+  R: number[];
+  t: number[];
+  f: number;
+  fy?: number;
+  cx?: number;
+  cy?: number;
+  featureWidth: number;
+  featureHeight: number;
+  k1: number;
+  k2: number;
+}
+
+async function decodePhoto(file: Blob) {
+  const probe = await createImageBitmap(file);
+  const scale = Math.min(1, TEXTURE_PHOTO_MAX / Math.max(probe.width, probe.height));
+  const width = Math.round(probe.width * scale), height = Math.round(probe.height * scale);
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d", { willReadFrequently: true })!;
+  context.drawImage(probe, 0, 0, width, height);
+  probe.close();
+  return context.getImageData(0, 0, width, height);
+}
+
+/** Pair each solved camera with its photo by file name (frames that failed to decode are skipped). */
+function photoViews(metas: ViewMeta[], files: File[]): PhotoView[] {
+  const byName = new Map<string, File[]>();
+  for (const file of files) byName.set(file.name, [...(byName.get(file.name) ?? []), file]);
+  return metas.flatMap((meta) => {
+    const file = byName.get(meta.name)?.shift();
+    return file ? [{ ...meta, load: () => decodePhoto(file) }] : [];
+  });
+}
 
 const isPhone = () => matchMedia("(any-pointer: coarse)").matches && Math.min(screen.width, screen.height) <= 820;
 
@@ -107,6 +149,8 @@ export function setupScanLab() {
   let session: SplatSession | null = null;
   let splat: { data: Float32Array; n: number; dc: "sigmoid" | "sh" } | null = null;
   let cameras: ScanCamera[] = [];
+  let viewMetas: ViewMeta[] = [];
+  let scannedPhotos: File[] = [];
   let glbBlob: Blob | null = null;
   let glbUrl = "";
   let usdzBlob: Blob | null = null;
@@ -335,7 +379,8 @@ export function setupScanLab() {
 
     try {
       setProgress(STAGE_LABELS.decode, 0, `Processing ${photos.length} photos. Nothing leaves this device.`);
-      await created.load(photos);
+      scannedPhotos = photos.slice();
+      await created.load(scannedPhotos);
       // live captures carry no EXIF lens data; without a starting focal the
       // solver's search can lock onto a wrong lens and scatter the cameras
       const frames = created.frames as { fw: number; fh: number; exif?: { f35?: number } | null }[];
@@ -392,8 +437,16 @@ export function setupScanLab() {
           up: [-R[3], -R[4], -R[5]] as Vec3,
         };
       });
+      const recon = current.recon;
+      viewMetas = recon.cams.map((camera: { imgIdx: number; R: number[]; t: number[]; f: number; fy?: number; cx?: number; cy?: number }) => {
+        const frame = current.frames[camera.imgIdx];
+        return {
+          name: frame.name, R: Array.from(camera.R), t: Array.from(camera.t), f: camera.f, fy: camera.fy, cx: camera.cx, cy: camera.cy,
+          featureWidth: frame.fw, featureHeight: frame.fh, k1: recon.k1 ?? 0, k2: recon.k2 ?? 0,
+        };
+      });
       current.pause();
-      if (import.meta.env.DEV) Object.assign(window, { spatialDropScan: { splat, cameras, session: current } });
+      if (import.meta.env.DEV) Object.assign(window, { spatialDropScan: { splat, cameras, viewMetas, session: current } });
       await makeMesh();
     } catch (reason) {
       setState("idle");
@@ -417,9 +470,17 @@ export function setupScanLab() {
         resolution: 104,
         targetTriangles: DETAIL_TRIANGLES[detailInput.value] ?? DETAIL_TRIANGLES.standard,
       });
-      setProgress("Painting the texture", 99, "Coloring the surface from the splat…");
+      setProgress("Painting the texture", 98.5, "Coloring the surface from the splat…");
       await new Promise((resolve) => setTimeout(resolve, 30));
-      const exports = await exportModels(mesh, bakeTextureAtlas(mesh, { size: 1024 }));
+      const atlas = bakeTextureAtlas(mesh, { size: 1024 });
+      const views = photoViews(viewMetas, scannedPhotos);
+      if (views.length) {
+        // the photos hold far more detail than the splat's colors
+        await projectPhotos(atlas, mesh, views, {
+          onProgress: (done, total) => setProgress("Painting the texture", 98.5 + done / total, `Projecting photo ${Math.min(done + 1, total)} of ${total} onto the surface…`),
+        });
+      }
+      const exports = await exportModels(mesh, atlas);
       glbBlob = exports.glb;
       usdzBlob = exports.usdz;
       if (glbUrl) URL.revokeObjectURL(glbUrl);
@@ -519,9 +580,11 @@ export function setupScanLab() {
   });
   if (import.meta.env.DEV) {
     Object.assign(window, {
-      spatialDropLoadSplat(saved: { data: Float32Array; n: number; dc: "sigmoid" | "sh"; cameras: ScanCamera[] }) {
+      spatialDropLoadSplat(saved: { data: Float32Array; n: number; dc: "sigmoid" | "sh"; cameras: ScanCamera[]; viewMetas?: ViewMeta[] }, files: File[] = []) {
         splat = { data: saved.data, n: saved.n, dc: saved.dc };
         cameras = saved.cameras;
+        viewMetas = saved.viewMetas ?? [];
+        scannedPhotos = files;
         return makeMesh();
       },
     });

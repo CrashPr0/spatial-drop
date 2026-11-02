@@ -40,6 +40,9 @@ export interface ScanMesh {
   indices: Uint32Array;
   /** splat color at a point on (or near) the output surface, in output meters */
   sampleColor: (point: Vec3, out: Vec3) => Vec3;
+  /** output meters back to the reconstruction's world frame (where the cameras live) */
+  toWorld: (point: Vec3) => Vec3;
+  directionToWorld: (direction: Vec3) => Vec3;
   stats: {
     splatsUsed: number;
     groundRemoved: boolean;
@@ -116,6 +119,13 @@ function rotationBetween(from: Vec3, to: Vec3) {
     v[2] * v[0] * k - v[1], v[2] * v[1] * k + v[0], v[2] * v[2] * k + c,
   ];
 }
+
+/** transpose(m) · p, the inverse of a rotation */
+const applyTransposed = (m: number[], p: Vec3): Vec3 => [
+  m[0] * p[0] + m[3] * p[1] + m[6] * p[2],
+  m[1] * p[0] + m[4] * p[1] + m[7] * p[2],
+  m[2] * p[0] + m[5] * p[1] + m[8] * p[2],
+];
 
 const apply = (m: number[], p: Vec3): Vec3 => [
   m[0] * p[0] + m[1] * p[1] + m[2] * p[2],
@@ -219,13 +229,14 @@ export function prepareSubject(cloud: SplatCloud, cameras: ScanCamera[], options
 
   let floor = -Infinity;
   let groundRemoved = false;
+  let level = [1, 0, 0, 0, 1, 0, 0, 0, 1];
   if (options.removeGround !== false) {
     const solid = splats.filter((splat) => splat.alpha > 0.5).map((splat) => splat.position);
     // a trained splat surface is a few percent of the subject radius thick
     const ground = findGround(solid, 0.04 * radius);
     if (ground) {
       // level the subject on the ground plane, then cut the plane away
-      const level = rotationBetween(ground.normal, [0, 1, 0]);
+      level = rotationBetween(ground.normal, [0, 1, 0]);
       for (const splat of splats) {
         splat.position = apply(level, splat.position);
         splat.axes = splat.axes.map((axis) => apply(level, axis)) as [Vec3, Vec3, Vec3];
@@ -235,7 +246,8 @@ export function prepareSubject(cloud: SplatCloud, cameras: ScanCamera[], options
     }
   }
   const subject = splats.filter((splat) => splat.position[1] > floor);
-  return { splats: subject, radius, floor, groundRemoved };
+  // local = level · basis · (world − center)
+  return { splats: subject, radius, floor, groundRemoved, transform: { center: center as Vec3, basis, level } };
 }
 
 interface Grid {
@@ -507,7 +519,7 @@ function computeNormals(positions: Float32Array, indices: Uint32Array) {
 
 export function buildScanMesh(cloud: SplatCloud, cameras: ScanCamera[], options: MeshOptions = {}): ScanMesh {
   const resolution = options.resolution ?? 96;
-  const { splats, groundRemoved, floor } = prepareSubject(cloud, cameras, options);
+  const { splats, groundRemoved, floor, transform } = prepareSubject(cloud, cameras, options);
   if (splats.length < 50) throw new Error("Too little of the scan landed on the subject. Widen the crop or rescan closer to the object.");
 
   // grid around the robust extent of the subject (ignores the last stray splats)
@@ -693,6 +705,13 @@ export function buildScanMesh(cloud: SplatCloud, cameras: ScanCamera[], options:
       for (let k = 0; k < 3; k++) local[k] = p[k] / metersPerUnit + middle[k];
       return splatColor(local, out);
     },
+    toWorld(p) {
+      const back = applyTransposed(transform.basis, applyTransposed(transform.level, [
+        p[0] / metersPerUnit + middle[0], p[1] / metersPerUnit + middle[1], p[2] / metersPerUnit + middle[2],
+      ]));
+      return [back[0] + transform.center[0], back[1] + transform.center[1], back[2] + transform.center[2]];
+    },
+    directionToWorld: (d) => applyTransposed(transform.basis, applyTransposed(transform.level, d)),
     stats: {
       splatsUsed: used,
       groundRemoved,
@@ -951,6 +970,10 @@ export function bakeTextureAtlas(mesh: ScanMesh, options: { size?: number; maxSi
   }
 
   const pixels = new Uint8ClampedArray(size * size * 4);
+  // the surface point and normal behind every texel, for photo projection
+  const texelPoints = new Float32Array(size * size * 3);
+  const texelNormals = new Float32Array(size * size * 3);
+  const texelUsed = new Uint8Array(size * size);
   const indices = new Uint32Array(triangles * 3);
   const positions = new Float32Array(triangles * 9);
   const normals = new Float32Array(triangles * 9);
@@ -965,6 +988,10 @@ export function bakeTextureAtlas(mesh: ScanMesh, options: { size?: number; maxSi
   const upper = [[n - 1, n - 1], [n - 1, 2], [2, n - 1]];
   const point: Vec3 = [0, 0, 0];
   const rgb: Vec3 = [0, 0, 0];
+  const cornerNormal = (t: number, k: number): Vec3 => {
+    const v = mesh.indices[order[t] * 3 + k];
+    return [mesh.normals[v * 3], mesh.normals[v * 3 + 1], mesh.normals[v * 3 + 2]];
+  };
 
   for (let pair = 0; pair < pairs; pair++) {
     const ox = cellSlots[pair][0] * n;
@@ -982,6 +1009,7 @@ export function bakeTextureAtlas(mesh: ScanMesh, options: { size?: number; maxSi
         uvs[t * 6 + k * 2 + 1] = (oy + layout[k][1] + 0.5) / size;
       }
       const p0 = corner(t, 0), p1 = corner(t, 1), p2 = corner(t, 2);
+      const n0 = cornerNormal(t, 0), n1 = cornerNormal(t, 1), n2 = cornerNormal(t, 2);
       const legs = half ? n - 3 : n - 2;
       for (let row = 0; row < n; row++) {
         for (let column = 0; column < n; column++) {
@@ -992,14 +1020,23 @@ export function bakeTextureAtlas(mesh: ScanMesh, options: { size?: number; maxSi
           const r = half ? (n - 1 - column) / legs : row / legs;
           for (let k = 0; k < 3; k++) point[k] = p0[k] + s * (p1[k] - p0[k]) + r * (p2[k] - p0[k]);
           mesh.sampleColor(point, rgb);
-          const o = ((oy + row) * size + ox + column) * 4;
+          const texel = (oy + row) * size + ox + column;
+          texelUsed[texel] = 1;
+          const w0 = 1 - s - r;
+          const nx = w0 * n0[0] + s * n1[0] + r * n2[0];
+          const ny = w0 * n0[1] + s * n1[1] + r * n2[1];
+          const nz = w0 * n0[2] + s * n1[2] + r * n2[2];
+          const nl = Math.hypot(nx, ny, nz) || 1;
+          texelPoints[texel * 3] = point[0]; texelPoints[texel * 3 + 1] = point[1]; texelPoints[texel * 3 + 2] = point[2];
+          texelNormals[texel * 3] = nx / nl; texelNormals[texel * 3 + 1] = ny / nl; texelNormals[texel * 3 + 2] = nz / nl;
+          const o = texel * 4;
           pixels[o] = toByte(rgb[0]); pixels[o + 1] = toByte(rgb[1]); pixels[o + 2] = toByte(rgb[2]); pixels[o + 3] = 255;
         }
       }
     }
   }
   // `indices` lists the source mesh's triangles in atlas order; `uvs` follow it
-  return { size, cell: n, pixels, indices, positions, normals, uvs };
+  return { size, cell: n, pixels, indices, positions, normals, uvs, texelPoints, texelNormals, texelUsed };
 }
 
 /** Indices 0..count-1 sorted along a 3D Z-order curve of the given coordinates. */

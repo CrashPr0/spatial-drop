@@ -4,7 +4,8 @@
 //   await makeOrbit();            // renders 44 views of a known scene and starts a build
 //   scanStatus();                 // progress
 //   await saveScan();             // keep the trained splat in IndexedDB
-//   await spatialDropLoadSplat(await loadSaved());   // re-mesh it after editing scan-mesh.ts
+//   await makeOrbit({ build: false });               // regenerate the same photos (deterministic)
+//   await spatialDropLoadSplat(await loadSaved(), __orbitFiles);   // re-mesh and re-texture without retraining
 // Ground truth: a 0.18 x 0.26 x 0.14 m box (turned 0.5 rad) with a 0.08 m sphere on top,
 // cameras on rings of radius 0.62 m / 0.55 m at heights 0.22 m / 0.48 m looking at y = 0.17 m.
 window.makeOrbit = async function makeOrbit({ build = true } = {}) {
@@ -73,4 +74,4 @@ window.scanStatus = () => ({
   err: document.querySelector('#scan-error').hidden ? null : document.querySelector('#scan-error').textContent,
 });
 window.loadSaved = () => new Promise((res) => { const r = indexedDB.open('scan-dev', 1); r.onupgradeneeded = () => r.result.createObjectStore('k'); r.onsuccess = () => { const g = r.result.transaction('k').objectStore('k').get('last'); g.onsuccess = () => res(g.result); }; });
-window.saveScan = () => new Promise((res, rej) => { const s = window.spatialDropScan; const ses = s.session; const names = ses.recon.cams.map((k) => ses.frames[k.imgIdx].name); const r = indexedDB.open('scan-dev', 1); r.onupgradeneeded = () => r.result.createObjectStore('k'); r.onsuccess = () => { const tx = r.result.transaction('k', 'readwrite'); tx.objectStore('k').put({ data: s.splat.data, n: s.splat.n, dc: s.splat.dc, cameras: s.cameras, names }, 'last'); tx.oncomplete = () => res(true); tx.onerror = rej; }; });
+window.saveScan = () => new Promise((res, rej) => { const s = window.spatialDropScan; const ses = s.session; const names = ses.recon.cams.map((k) => ses.frames[k.imgIdx].name); const r = indexedDB.open('scan-dev', 1); r.onupgradeneeded = () => r.result.createObjectStore('k'); r.onsuccess = () => { const tx = r.result.transaction('k', 'readwrite'); tx.objectStore('k').put({ data: s.splat.data, n: s.splat.n, dc: s.splat.dc, cameras: s.cameras, viewMetas: s.viewMetas, names }, 'last'); tx.oncomplete = () => res(true); tx.onerror = rej; }; });
