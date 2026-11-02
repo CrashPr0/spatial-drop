@@ -14,6 +14,7 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "pages-src/public/cimbar/**",
+    "pages-src/vendor/**",
     "next-env.d.ts",
   ]),
   eslint.configs.recommended,

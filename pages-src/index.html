@@ -19,6 +19,7 @@
         </a>
         <nav class="mode-nav" aria-label="Spatial Drop modes">
           <button type="button" data-mode="studio">Studio</button>
+          <button type="button" data-mode="scan">Scan</button>
           <button type="button" data-mode="beam">QR Beam</button>
           <button type="button" data-mode="receive">Receive</button>
         </nav>
@@ -88,6 +89,79 @@
         <div><p class="eyebrow">SHARE LINK READY</p><h2>From screen<br />to space.</h2><p id="share-url"></p><div class="actions"><button id="copy-button" type="button">Copy link</button><a id="open-link" href="#">Open AR page ↗</a></div></div>
         <div class="qr"><canvas id="qr-canvas"></canvas><strong>SCAN TO PLACE · SPATIAL DROP</strong></div>
       </section>
+      </div>
+
+      <div id="scan-mode" class="mode-panel" hidden>
+        <section class="lab-intro">
+          <p class="eyebrow">EXPERIMENT 02 · ON-DEVICE 3D SCANNING</p>
+          <h1>Scan it<br />right here.</h1>
+          <p>Walk around an object with your phone. Spatial Drop solves the camera path, trains a Gaussian splat and carves an AR-ready mesh, all on this device with no app and no upload.</p>
+        </section>
+
+        <section class="scan-workbench">
+          <article class="scanner-card scan-capture-card">
+            <div class="receiver-transport-switch"><span>01 · CAPTURE</span><strong class="scan-count"><b id="scan-photo-count">0</b> PHOTOS</strong></div>
+            <div class="scanner-viewport scan-viewport">
+              <video id="scan-video" playsinline muted aria-label="Scan camera preview"></video>
+              <div class="scanner-reticle" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+              <div id="scan-idle" class="scanner-idle"><span>ORBIT CAPTURE</span><strong>Camera is off</strong></div>
+            </div>
+            <p class="scan-tip"><b>How to scan:</b> put the object on a textured table in even light. Circle it slowly at arm's length, then do a second, higher loop. Frames are kept automatically when you have moved enough and the image is sharp.</p>
+            <p id="scan-capture-hint" class="scan-hint">12 more to start · 30–60 recommended</p>
+            <div class="scanner-controls">
+              <button id="scan-camera-button" class="primary" type="button"><span>Start capture</span><span>●</span></button>
+              <button id="scan-stop-button" class="secondary-button" type="button" hidden>Stop capture</button>
+            </div>
+            <div id="scan-drop-zone" class="drop-zone scan-drop-zone" role="button" tabindex="0">
+              <input id="scan-file-input" type="file" accept="image/*,video/*" multiple hidden />
+              <span class="upload-mark">↗</span>
+              <div><strong>Or choose photos or one video</strong><small>JPEG, PNG or HEIC photos · MP4 or MOV orbit clip</small></div>
+            </div>
+            <div id="scan-thumbs" class="scan-thumbs" aria-label="Most recent scan photos"></div>
+            <button id="scan-clear-button" class="text-button scan-clear" type="button">Clear photos</button>
+          </article>
+
+          <article class="receive-status-card scan-status-card">
+            <div class="receive-protocol"><p class="eyebrow">02 · RECONSTRUCT</p><strong>WEBGPU · LOCAL</strong></div>
+            <div class="receive-status-heading"><h2 id="scan-stage-title">Waiting for photos</h2><strong id="scan-percentage">0%</strong></div>
+            <div class="receive-progress" aria-label="Scan progress"><i id="scan-progress-bar"></i></div>
+            <p id="scan-detail" class="scan-detail">Capture at least 12 overlapping photos, then build. A phone takes several minutes; keep this tab in front while it works.</p>
+            <div class="receive-metrics">
+              <div><span>CAMERAS</span><strong id="scan-metric-cameras">—</strong></div>
+              <div><span>SPLATS</span><strong id="scan-metric-splats">—</strong></div>
+              <div><span>ELAPSED</span><strong id="scan-metric-time">0:00</strong></div>
+            </div>
+            <canvas id="scan-live-canvas" class="scan-live-canvas" hidden aria-label="Live view of the splat being trained"></canvas>
+            <p id="scan-error" class="error" role="alert" hidden></p>
+            <button id="scan-build-button" class="primary" type="button" disabled><span>Build 3D model</span><span>→</span></button>
+            <button id="scan-finish-button" class="secondary-button scan-finish" type="button" hidden>Finish now and make the mesh</button>
+
+            <div id="scan-mesh-panel" class="scan-mesh-panel" hidden>
+              <p class="eyebrow">03 · AR MODEL</p>
+              <div class="received-model-stage scan-model-stage">
+                <model-viewer id="scan-viewer" ar ar-modes="webxr quick-look" camera-controls auto-rotate shadow-intensity="0.9" environment-image="neutral" touch-action="pan-y">
+                  <button slot="ar-button" class="ar-button">✦&nbsp;&nbsp;View in your space</button>
+                </model-viewer>
+              </div>
+              <p id="scan-mesh-stats" class="scan-mesh-stats"></p>
+              <div class="scan-mesh-controls">
+                <label class="field"><span>Real height (cm)</span><input id="scan-height" type="number" inputmode="decimal" min="1" max="500" step="1" value="30" /></label>
+                <label class="field"><span>Crop</span><input id="scan-crop" type="range" min="0.15" max="0.9" step="0.05" value="0.45" /></label>
+                <label class="field"><span>Density</span><input id="scan-density" type="range" min="0.12" max="0.7" step="0.02" value="0.35" /></label>
+                <label class="field"><span>Detail</span><select id="scan-detail-level"><option value="light">Light · 6k triangles</option><option value="standard" selected>Standard · 15k</option><option value="high">High · 40k</option></select></label>
+              </div>
+              <button id="scan-rebuild-button" class="text-button" type="button">Rebuild mesh with these settings →</button>
+              <div class="actions scan-actions">
+                <button id="scan-ar-button" type="button">Place with 8th Wall</button>
+                <button id="scan-studio-button" type="button">Open in Studio</button>
+                <button id="scan-glb-button" type="button">Download GLB</button>
+                <button id="scan-usdz-button" type="button">Download USDZ</button>
+                <button id="scan-ply-button" type="button">Download splat</button>
+              </div>
+              <p id="scan-ar-error" class="error" role="alert" hidden></p>
+            </div>
+          </article>
+        </section>
       </div>
 
       <div id="beam-mode" class="mode-panel" hidden>
@@ -204,7 +278,7 @@
         </section>
       </div>
 
-      <footer><span>SPATIAL DROP · SJSU-INSPIRED XR PROTOTYPE</span><span>XR ENGINE © 2026 NIANTIC SPATIAL, INC. · <a href="https://github.com/8thwall/engine/blob/main/LICENSE">LICENSE</a> · CIMBAR <a href="./cimbar/LICENSE">MPL-2.0</a></span></footer>
+      <footer><span>SPATIAL DROP · SJSU-INSPIRED XR PROTOTYPE</span><span>XR ENGINE © 2026 NIANTIC SPATIAL, INC. · <a href="https://github.com/8thwall/engine/blob/main/LICENSE">LICENSE</a> · CIMBAR <a href="./cimbar/LICENSE">MPL-2.0</a> · SPLAT.JS © STRATUM1 GMBH, MIT</span></footer>
 
       <div id="beam-ar-overlay" class="beam-ar-overlay" hidden>
         <div id="beam-ar-root" class="beam-ar-root"></div>
