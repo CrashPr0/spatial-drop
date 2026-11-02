@@ -105,12 +105,13 @@
               <video id="scan-video" playsinline muted aria-label="Scan camera preview"></video>
               <img id="scan-ghost" class="scan-ghost" alt="" hidden />
               <div class="scanner-reticle" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+              <svg id="scan-ring" class="scan-ring" viewBox="0 0 100 100" role="img" aria-label="Scan coverage around the object" hidden><path data-segment="0" class="scan-ring-segment" /><path data-segment="1" class="scan-ring-segment" /><path data-segment="2" class="scan-ring-segment" /><path data-segment="3" class="scan-ring-segment" /><path data-segment="4" class="scan-ring-segment" /><path data-segment="5" class="scan-ring-segment" /><path data-segment="6" class="scan-ring-segment" /><path data-segment="7" class="scan-ring-segment" /><path data-segment="8" class="scan-ring-segment" /><path data-segment="9" class="scan-ring-segment" /><path data-segment="10" class="scan-ring-segment" /><path data-segment="11" class="scan-ring-segment" /><circle class="scan-ring-marker" r="3.6" /><text class="scan-ring-percent" x="50" y="53" text-anchor="middle">0%</text></svg>
               <div id="scan-arrow" class="scan-arrow" aria-hidden="true" hidden><i></i><i></i></div>
               <div id="scan-countdown" class="scan-countdown" aria-live="assertive" hidden></div>
               <div id="scan-guide" class="scan-guide" aria-live="polite" hidden><span id="scan-guide-ring" class="scan-guide-ring"></span><span id="scan-guide-text"></span></div>
               <div id="scan-idle" class="scanner-idle"><span>ORBIT CAPTURE</span><strong>Camera is off</strong></div>
             </div>
-            <p class="scan-tip"><b>How to scan:</b> put the object on a textured table in even light. Circle it slowly at arm's length, then do a second, higher loop. Follow the arrow around the object, stop when it says hold, and hold still while the ring fills. If it says you went too far, go back the way the arrow points until the faded last photo lines up.</p>
+            <p class="scan-tip"><b>How to scan:</b> put the object on a textured table in even light. Circle it slowly at arm's length, then do a second, higher loop. Follow the arrow around the object and watch the ring in the corner: each segment fills as that side is photographed, and the arrow points at the nearest side still open. Stop when it says hold, and hold still while the small circle fills. If it says you went too far, go back the way the arrow points until the faded last photo lines up.</p>
             <p id="scan-capture-hint" class="scan-hint">12 more to start · 30–60 recommended</p>
             <div class="scanner-controls">
               <button id="scan-camera-button" class="primary" type="button"><span>Start capture</span><span>●</span></button>
