@@ -1,8 +1,8 @@
 import { BufferAttribute, BufferGeometry, CanvasTexture, LinearFilter, Mesh, MeshStandardMaterial, SRGBColorSpace } from "three";
 import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
-import { bakeTextureAtlas, buildScanMesh, type ScanCamera, type ScanMesh, type Vec3 } from "./scan-mesh";
-import { projectPhotos, type PhotoView } from "./scan-texture";
+import type { ScanCamera, Vec3 } from "./scan-mesh";
 import { buildUsdz } from "./scan-usdz";
+import type { MeshJob, MeshWorkerMessage, ViewMeta } from "./scan-worker";
 
 // the reconstruction library (~1 MB) loads only when someone actually scans
 const loadSplat = () => import("./vendor/splat/index.js");
@@ -34,44 +34,23 @@ const STAGE_SPANS: Record<string, [number, number]> = {
 // triangle budgets per detail level; texture detail is baked separately
 const DETAIL_TRIANGLES: Record<string, number> = { light: 6000, standard: 15000, high: 40000 };
 
-// photos are decoded at most this large for texturing
-const TEXTURE_PHOTO_MAX = 1600;
+type MeshResult = Extract<MeshWorkerMessage, { type: "done" }>;
 
-/** Camera data the texture projector needs, without the photo itself. */
-interface ViewMeta {
-  name: string;
-  R: number[];
-  t: number[];
-  f: number;
-  fy?: number;
-  cx?: number;
-  cy?: number;
-  featureWidth: number;
-  featureHeight: number;
-  k1: number;
-  k2: number;
-}
-
-async function decodePhoto(file: Blob) {
-  const probe = await createImageBitmap(file);
-  const scale = Math.min(1, TEXTURE_PHOTO_MAX / Math.max(probe.width, probe.height));
-  const width = Math.round(probe.width * scale), height = Math.round(probe.height * scale);
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const context = canvas.getContext("2d", { willReadFrequently: true })!;
-  context.drawImage(probe, 0, 0, width, height);
-  probe.close();
-  return context.getImageData(0, 0, width, height);
-}
-
-/** Pair each solved camera with its photo by file name (frames that failed to decode are skipped). */
-function photoViews(metas: ViewMeta[], files: File[]): PhotoView[] {
-  const byName = new Map<string, File[]>();
-  for (const file of files) byName.set(file.name, [...(byName.get(file.name) ?? []), file]);
-  return metas.flatMap((meta) => {
-    const file = byName.get(meta.name)?.shift();
-    return file ? [{ ...meta, load: () => decodePhoto(file) }] : [];
+/** Run one meshing job in a fresh worker; `signal` aborts it by terminating the worker. */
+function runMeshWorker(job: MeshJob, onProgress: (message: Extract<MeshWorkerMessage, { type: "progress" }>) => void, signal: AbortSignal) {
+  return new Promise<MeshResult>((resolve, reject) => {
+    const worker = new Worker(new URL("./scan-worker.ts", import.meta.url), { type: "module" });
+    const finish = () => { worker.terminate(); signal.removeEventListener("abort", abort); };
+    const abort = () => { finish(); reject(new DOMException("Superseded", "AbortError")); };
+    signal.addEventListener("abort", abort);
+    worker.onmessage = ({ data }: MessageEvent<MeshWorkerMessage>) => {
+      if (data.type === "progress") return onProgress(data);
+      finish();
+      if (data.type === "done") resolve(data);
+      else reject(new Error(data.message));
+    };
+    worker.onerror = (event) => { finish(); reject(new Error(event.message || "The meshing worker failed.")); };
+    worker.postMessage(job);
   });
 }
 
@@ -456,36 +435,39 @@ export function setupScanLab() {
     }
   }
 
+  let meshJob: AbortController | null = null;
+
   async function makeMesh() {
     if (!splat) return;
+    meshJob?.abort();
+    const job = new AbortController();
+    meshJob = job;
     setState("meshing");
     setProgress("Building the AR mesh", 98, "Carving a solid surface out of the splat…");
-    await new Promise((resolve) => setTimeout(resolve, 30));
     try {
       const heightCm = Math.min(500, Math.max(1, Number(heightInput.value) || 30));
-      const mesh = buildScanMesh(splat, cameras, {
-        heightMeters: heightCm / 100,
-        crop: Number(cropInput.value),
-        density: Number(densityInput.value),
-        resolution: 104,
-        targetTriangles: DETAIL_TRIANGLES[detailInput.value] ?? DETAIL_TRIANGLES.standard,
-        views: viewMetas.map((meta) => ({
-          R: meta.R, t: meta.t, fx: meta.f, fy: meta.fy ?? meta.f,
-          cx: meta.cx ?? meta.featureWidth / 2, cy: meta.cy ?? meta.featureHeight / 2,
-          width: meta.featureWidth, height: meta.featureHeight,
-        })),
-      });
-      setProgress("Painting the texture", 98.5, "Coloring the surface from the splat…");
-      await new Promise((resolve) => setTimeout(resolve, 30));
-      const atlas = bakeTextureAtlas(mesh, { size: 1024 });
-      const views = photoViews(viewMetas, scannedPhotos);
-      if (views.length) {
-        // the photos hold far more detail than the splat's colors
-        await projectPhotos(atlas, mesh, views, {
-          onProgress: (done, total) => setProgress("Painting the texture", 98.5 + done / total, `Projecting photo ${Math.min(done + 1, total)} of ${total} onto the surface…`),
-        });
-      }
+      const { mesh, atlas } = await runMeshWorker({
+        // a copy: the worker's buffers are gone once it finishes, and rebuilds need the splat again
+        splat: { data: splat.data.slice(), n: splat.n, dc: splat.dc },
+        cameras,
+        viewMetas,
+        photos: scannedPhotos,
+        options: {
+          heightMeters: heightCm / 100,
+          crop: Number(cropInput.value),
+          density: Number(densityInput.value),
+          resolution: 104,
+          targetTriangles: DETAIL_TRIANGLES[detailInput.value] ?? DETAIL_TRIANGLES.standard,
+        },
+        textureSize: 1024,
+      }, (progress) => {
+        if (progress.stage === "texture") {
+          const { done, total } = progress;
+          setProgress("Painting the texture", 98.5 + done / total, `Projecting photo ${Math.min(done + 1, total)} of ${total} onto the surface…`);
+        }
+      }, job.signal);
       const exports = await exportModels(mesh, atlas);
+      if (meshJob !== job) return;
       glbBlob = exports.glb;
       usdzBlob = exports.usdz;
       if (glbUrl) URL.revokeObjectURL(glbUrl);
@@ -502,13 +484,16 @@ export function setupScanLab() {
       window.dispatchEvent(new CustomEvent("spatialdrop:scanready", { detail: glbUrl }));
       setState("ready");
     } catch (reason) {
+      if (reason instanceof DOMException && reason.name === "AbortError") return;
       setState("ready");
       meshPanel.hidden = false;
       setError(reason instanceof Error ? reason.message : "The mesh could not be built.");
+    } finally {
+      if (meshJob === job) meshJob = null;
     }
   }
 
-  async function exportModels(scan: ScanMesh, atlas: ReturnType<typeof bakeTextureAtlas>) {
+  async function exportModels(scan: MeshResult["mesh"], atlas: MeshResult["atlas"]) {
     const canvas = document.createElement("canvas");
     canvas.width = atlas.size;
     canvas.height = atlas.size;
