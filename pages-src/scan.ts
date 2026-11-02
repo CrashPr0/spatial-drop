@@ -1,6 +1,7 @@
 import { BufferAttribute, BufferGeometry, CanvasTexture, LinearFilter, Mesh, MeshStandardMaterial, SRGBColorSpace } from "three";
 import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
-import { bakeColorAtlas, buildScanMesh, type ScanCamera, type Vec3 } from "./scan-mesh";
+import { bakeTextureAtlas, buildScanMesh, type ScanCamera, type ScanMesh, type Vec3 } from "./scan-mesh";
+import { buildUsdz } from "./scan-usdz";
 
 // the reconstruction library (~1 MB) loads only when someone actually scans
 const loadSplat = () => import("./vendor/splat/index.js");
@@ -28,6 +29,9 @@ const STAGE_SPANS: Record<string, [number, number]> = {
   decode: [0, 6], features: [6, 18], matching: [18, 30], focal: [30, 34], pass: [30, 34],
   register: [34, 42], ba: [42, 46], solved: [46, 48], seed: [48, 50], train: [50, 96],
 };
+
+// triangle budgets per detail level; texture detail is baked separately
+const DETAIL_TRIANGLES: Record<string, number> = { light: 6000, standard: 15000, high: 40000 };
 
 const isPhone = () => matchMedia("(any-pointer: coarse)").matches && Math.min(screen.width, screen.height) <= 820;
 
@@ -93,6 +97,7 @@ export function setupScanLab() {
   const studioButton = $<HTMLButtonElement>("#scan-studio-button");
   const glbButton = $<HTMLButtonElement>("#scan-glb-button");
   const plyButton = $<HTMLButtonElement>("#scan-ply-button");
+  const usdzButton = $<HTMLButtonElement>("#scan-usdz-button");
   const arButton = $<HTMLButtonElement>("#scan-ar-button");
 
   let state: ScanState = "idle";
@@ -104,6 +109,8 @@ export function setupScanLab() {
   let cameras: ScanCamera[] = [];
   let glbBlob: Blob | null = null;
   let glbUrl = "";
+  let usdzBlob: Blob | null = null;
+  let usdzUrl = "";
   let startedAt = 0;
   let clockTimer = 0;
   let lookTimer = 0;
@@ -407,15 +414,23 @@ export function setupScanLab() {
         heightMeters: heightCm / 100,
         crop: Number(cropInput.value),
         density: Number(densityInput.value),
-        resolution: Number(detailInput.value) || 80,
+        resolution: 104,
+        targetTriangles: DETAIL_TRIANGLES[detailInput.value] ?? DETAIL_TRIANGLES.standard,
       });
-      const atlas = bakeColorAtlas(mesh);
-      glbBlob = await exportGlb(atlas);
+      setProgress("Painting the texture", 99, "Coloring the surface from the splat…");
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const exports = await exportModels(mesh, bakeTextureAtlas(mesh, { size: 1024 }));
+      glbBlob = exports.glb;
+      usdzBlob = exports.usdz;
       if (glbUrl) URL.revokeObjectURL(glbUrl);
+      if (usdzUrl) URL.revokeObjectURL(usdzUrl);
       glbUrl = URL.createObjectURL(glbBlob);
+      usdzUrl = URL.createObjectURL(usdzBlob);
+      // a ready-made USDZ for Quick Look, so the iPhone does not convert at tap time
+      viewer.setAttribute("ios-src", usdzUrl);
       viewer.setAttribute("src", glbUrl);
       const [w, h, d] = mesh.stats.sizeMeters.map((value) => Math.round(value * 100));
-      meshStats.textContent = `${mesh.stats.triangles.toLocaleString()} triangles · ${w} × ${h} × ${d} cm · ${formatBytes(glbBlob.size)}${mesh.stats.groundRemoved ? " · ground removed" : ""}`;
+      meshStats.textContent = `${mesh.stats.triangles.toLocaleString()} triangles · ${w} × ${h} × ${d} cm · GLB ${formatBytes(glbBlob.size)} · USDZ ${formatBytes(usdzBlob.size)}${mesh.stats.groundRemoved ? " · ground removed" : ""}`;
       meshPanel.hidden = false;
       setProgress("Model ready", 100, "Your scan is a local GLB now. Place it in AR, open it in Studio, or download it.");
       window.dispatchEvent(new CustomEvent("spatialdrop:scanready", { detail: glbUrl }));
@@ -427,7 +442,7 @@ export function setupScanLab() {
     }
   }
 
-  async function exportGlb(atlas: ReturnType<typeof bakeColorAtlas>) {
+  async function exportModels(scan: ScanMesh, atlas: ReturnType<typeof bakeTextureAtlas>) {
     const canvas = document.createElement("canvas");
     canvas.width = atlas.size;
     canvas.height = atlas.size;
@@ -438,8 +453,8 @@ export function setupScanLab() {
     texture.generateMipmaps = false;
     texture.minFilter = LinearFilter;
     texture.magFilter = LinearFilter;
-    // PNG keeps each triangle's 2x2 texel cell exact; JPEG blocks would smear neighbors
-    texture.userData.mimeType = "image/png";
+    // the atlas is laid out in surface order, so JPEG blocks only blend neighboring surface
+    texture.userData.mimeType = "image/jpeg";
 
     const geometry = new BufferGeometry();
     geometry.setAttribute("position", new BufferAttribute(atlas.positions, 3));
@@ -448,9 +463,19 @@ export function setupScanLab() {
     const material = new MeshStandardMaterial({ map: texture, roughness: 0.85, metalness: 0 });
     const mesh = new Mesh(geometry, material);
     mesh.name = "Spatial Drop scan";
-    const result = await new GLTFExporter().parseAsync(mesh, { binary: true });
-    if (!(result instanceof ArrayBuffer)) throw new Error("The GLB export failed.");
-    return new Blob([result], { type: "model/gltf-binary" });
+    const [glb, jpeg] = await Promise.all([
+      new GLTFExporter().parseAsync(mesh, { binary: true }),
+      new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.92)),
+    ]);
+    if (!(glb instanceof ArrayBuffer)) throw new Error("The GLB export failed.");
+    if (!jpeg) throw new Error("The texture could not be encoded.");
+    // USD shares the mesh's points and gives each corner its atlas coordinate
+    const usdz = buildUsdz({ positions: scan.positions, normals: scan.normals, indices: atlas.indices, uvs: atlas.uvs },
+      new Uint8Array(await jpeg.arrayBuffer()));
+    return {
+      glb: new Blob([glb], { type: "model/gltf-binary" }),
+      usdz: new Blob([usdz], { type: "model/vnd.usdz+zip" }),
+    };
   }
 
   // ── wiring ─────────────────────────────────────────────────────────────
@@ -482,6 +507,7 @@ export function setupScanLab() {
   });
   rebuildButton.addEventListener("click", () => void makeMesh());
   glbButton.addEventListener("click", () => glbBlob && download(glbBlob, "spatial-drop-scan.glb"));
+  usdzButton.addEventListener("click", () => usdzBlob && download(usdzBlob, "spatial-drop-scan.usdz"));
   plyButton.addEventListener("click", async () => {
     if (!session?.trainer) return;
     download(await session.exportPlyBlob(), "spatial-drop-scan.ply");

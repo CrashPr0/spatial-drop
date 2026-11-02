@@ -2,8 +2,6 @@
 // every AR viewer understands. Everything here is plain typed-array math so it
 // runs on the phone that made the scan and can be unit tested in Node.
 
-import { edgeTable, triTable } from "three/addons/objects/MarchingCubes.js";
-
 export type Vec3 = [number, number, number];
 
 /** splat.js trainer layout, 16 floats per splat:
@@ -31,6 +29,8 @@ export interface MeshOptions {
   density?: number;
   removeGround?: boolean;
   smoothing?: number;
+  /** decimate the surface down to about this many triangles */
+  targetTriangles?: number;
 }
 
 export interface ScanMesh {
@@ -38,6 +38,8 @@ export interface ScanMesh {
   normals: Float32Array;
   colors: Float32Array;
   indices: Uint32Array;
+  /** splat color at a point on (or near) the output surface, in output meters */
+  sampleColor: (point: Vec3, out: Vec3) => Vec3;
   stats: {
     splatsUsed: number;
     groundRemoved: boolean;
@@ -386,50 +388,74 @@ function largestParts(solid: Uint8Array, grid: Grid) {
   return solid;
 }
 
-/** Marching cubes over a scalar field; triangles face away from high values. */
-function marchingCubes(field: Float32Array, grid: Grid, iso: number) {
+// Kuhn split of a cube into six tetrahedra along its main diagonal: every
+// face diagonal agrees with the neighboring cube's, so the surface has no
+// cracks (classic marching cubes tables leave holes in ambiguous cases).
+// Corners are bit masks: x = 1, y = 2, z = 4.
+const KUHN_TETS = [[1, 2, 4], [1, 4, 2], [2, 1, 4], [2, 4, 1], [4, 1, 2], [4, 2, 1]].map(([a, b]) => [0, a, a | b, 7]);
+
+/** Marching tetrahedra over a scalar field; triangles face from high values toward low ones. */
+function marchingTetrahedra(field: Float32Array, grid: Grid, iso: number) {
   const [nx, ny, nz] = grid.dims;
-  const edgeVertex = new Int32Array(nx * ny * nz * 3).fill(-1);
+  // edges join a corner to a superset corner: key by the lower corner and the direction bits
+  const edgeVertex = new Map<number, number>();
   const positions: number[] = [];
   const indices: number[] = [];
-  // edge -> [corner offset, axis] in the corner order v0..v7 of the tables
-  const corners: Vec3[] = [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]];
-  const edges: [number, number][] = [[0, 0], [1, 1], [3, 0], [0, 1], [4, 0], [5, 1], [7, 0], [4, 1], [0, 2], [1, 2], [2, 2], [3, 2]];
-  const cornerValues = new Float32Array(8);
-  const cubeEdges = new Int32Array(12);
+  const cornerValue = new Float64Array(8);
+  const corner = (x: number, y: number, z: number, c: number) => index(grid, x + (c & 1), y + ((c >> 1) & 1), z + ((c >> 2) & 1));
+
+  const vertexOn = (x: number, y: number, z: number, a: number, b: number) => {
+    const key = corner(x, y, z, a) * 8 + (a ^ b);
+    let id = edgeVertex.get(key);
+    if (id === undefined) {
+      const fa = cornerValue[a], fb = cornerValue[b];
+      const t = (iso - fa) / (fb - fa);
+      id = positions.length / 3;
+      edgeVertex.set(key, id);
+      positions.push(
+        grid.origin[0] + (x + (a & 1) + t * ((b & 1) - (a & 1))) * grid.cell,
+        grid.origin[1] + (y + ((a >> 1) & 1) + t * (((b >> 1) & 1) - ((a >> 1) & 1))) * grid.cell,
+        grid.origin[2] + (z + ((a >> 2) & 1) + t * (((b >> 2) & 1) - ((a >> 2) & 1))) * grid.cell,
+      );
+    }
+    return id;
+  };
+  const cornerPosition = (c: number): Vec3 => [c & 1, (c >> 1) & 1, (c >> 2) & 1];
+  // emit a triangle facing away from the inside corners
+  const emit = (i0: number, i1: number, i2: number, inside: number[], outside: number[]) => {
+    const p = (i: number): Vec3 => [positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]];
+    const a = p(i0), b = p(i1), c = p(i2);
+    const n = cross(sub(b, a), sub(c, a));
+    const mean = (corners: number[]) => corners.reduce<Vec3>((sum, k) => {
+      const q = cornerPosition(k);
+      return [sum[0] + q[0] / corners.length, sum[1] + q[1] / corners.length, sum[2] + q[2] / corners.length];
+    }, [0, 0, 0]);
+    const outward = sub(mean(outside), mean(inside));
+    if (dot(n, outward) >= 0) indices.push(i0, i1, i2);
+    else indices.push(i0, i2, i1);
+  };
 
   for (let z = 0; z < nz - 1; z++) for (let y = 0; y < ny - 1; y++) for (let x = 0; x < nx - 1; x++) {
-    let cube = 0;
+    let any = 0, all = 1;
     for (let c = 0; c < 8; c++) {
-      const value = field[index(grid, x + corners[c][0], y + corners[c][1], z + corners[c][2])];
-      cornerValues[c] = value;
-      if (value < iso) cube |= 1 << c;
+      cornerValue[c] = field[corner(x, y, z, c)];
+      if (cornerValue[c] > iso) any = 1; else all = 0;
     }
-    const mask = edgeTable[cube];
-    if (!mask) continue;
-    for (let e = 0; e < 12; e++) {
-      if (!(mask & (1 << e))) continue;
-      const [corner, axis] = edges[e];
-      const X = x + corners[corner][0], Y = y + corners[corner][1], Z = z + corners[corner][2];
-      const key = index(grid, X, Y, Z) * 3 + axis;
-      if (edgeVertex[key] < 0) {
-        const a = field[index(grid, X, Y, Z)];
-        const b = field[index(grid, X + (axis === 0 ? 1 : 0), Y + (axis === 1 ? 1 : 0), Z + (axis === 2 ? 1 : 0))];
-        const t = Math.abs(b - a) > 1e-9 ? (iso - a) / (b - a) : 0.5;
-        const p: Vec3 = [X, Y, Z];
-        p[axis] += t;
-        edgeVertex[key] = positions.length / 3;
-        positions.push(
-          grid.origin[0] + p[0] * grid.cell,
-          grid.origin[1] + p[1] * grid.cell,
-          grid.origin[2] + p[2] * grid.cell,
-        );
+    if (!any || all) continue;
+    for (const tet of KUHN_TETS) {
+      const inside = tet.filter((c) => cornerValue[c] > iso);
+      if (inside.length === 0 || inside.length === 4) continue;
+      const outside = tet.filter((c) => cornerValue[c] <= iso);
+      const edge = (a: number, b: number) => vertexOn(x, y, z, Math.min(a, b), Math.max(a, b));
+      if (inside.length === 1 || inside.length === 3) {
+        const [lone, others] = inside.length === 1 ? [inside[0], outside] : [outside[0], inside];
+        emit(edge(lone, others[0]), edge(lone, others[1]), edge(lone, others[2]), inside, outside);
+      } else {
+        const [a, b] = inside, [c, d] = outside;
+        const ac = edge(a, c), ad = edge(a, d), bd = edge(b, d), bc = edge(b, c);
+        emit(ac, ad, bd, inside, outside);
+        emit(ac, bd, bc, inside, outside);
       }
-      cubeEdges[e] = edgeVertex[key];
-    }
-    const row = cube << 4;
-    for (let k = 0; triTable[row + k] !== -1; k += 3) {
-      indices.push(cubeEdges[triTable[row + k]], cubeEdges[triTable[row + k + 1]], cubeEdges[triTable[row + k + 2]]);
     }
   }
   return { positions: new Float32Array(positions), indices: new Uint32Array(indices) };
@@ -493,11 +519,11 @@ export function buildScanMesh(cloud: SplatCloud, cameras: ScanCamera[], options:
   }
   if (groundRemoved) lo[1] = Math.max(lo[1], floor);
   const extent = Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) || 1;
-  const cell = extent / (resolution - 6);
+  const cell = extent / (resolution - 10);
   const grid: Grid = {
     cell,
-    origin: [lo[0] - 3 * cell, lo[1] - 3 * cell, lo[2] - 3 * cell],
-    dims: [0, 1, 2].map((k) => Math.ceil((hi[k] - lo[k]) / cell) + 7) as Vec3,
+    origin: [lo[0] - 5 * cell, lo[1] - 5 * cell, lo[2] - 5 * cell],
+    dims: [0, 1, 2].map((k) => Math.ceil((hi[k] - lo[k]) / cell) + 11) as Vec3,
   };
   const [nx, ny, nz] = grid.dims;
   const total = nx * ny * nz;
@@ -567,10 +593,15 @@ export function buildScanMesh(cloud: SplatCloud, cameras: ScanCamera[], options:
   }
   const solid = solidify(occupied, grid, floorVoxel);
 
+  // keep a clear margin so the blurred field is zero on the border and the surface closes
   const field = new Float32Array(total);
-  for (let i = 0; i < total; i++) field[i] = solid[i];
+  for (let z = 4; z < nz - 4; z++) for (let y = 4; y < ny - 4; y++) for (let x = 4; x < nx - 4; x++) {
+    const i = index(grid, x, y, z);
+    field[i] = solid[i];
+  }
   const smoothField = blur(field, grid.dims);
-  const { positions, indices } = marchingCubes(smoothField, grid, 0.5);
+  // just off 0.5: the blurred 0/1 field hits 0.5 exactly, which would put vertices on grid corners
+  let { positions, indices } = marchingTetrahedra(smoothField, grid, 0.5 - 1e-4);
   if (!indices.length) throw new Error("No surface was found. Try a lower density or a wider crop.");
   smooth(positions, indices, options.smoothing ?? 3);
 
@@ -606,14 +637,8 @@ export function buildScanMesh(cloud: SplatCloud, cameras: ScanCamera[], options:
     }
   }
 
-  const vertexCount = positions.length / 3;
-  const colors = new Float32Array(vertexCount * 3).fill(0.6);
-  for (let v = 0; v < vertexCount; v++) {
-    const g: Vec3 = [
-      (positions[v * 3] - grid.origin[0]) / cell,
-      (positions[v * 3 + 1] - grid.origin[1]) / cell,
-      (positions[v * 3 + 2] - grid.origin[2]) / cell,
-    ];
+  const voxelColor = (p: Vec3, out: Vec3) => {
+    const g: Vec3 = [(p[0] - grid.origin[0]) / cell, (p[1] - grid.origin[1]) / cell, (p[2] - grid.origin[2]) / cell];
     const x0 = Math.min(nx - 2, Math.max(0, Math.floor(g[0])));
     const y0 = Math.min(ny - 2, Math.max(0, Math.floor(g[1])));
     const z0 = Math.min(nz - 2, Math.max(0, Math.floor(g[2])));
@@ -626,7 +651,21 @@ export function buildScanMesh(cloud: SplatCloud, cameras: ScanCamera[], options:
         * (0.25 + Math.min(1, weightSum[i])); // prefer voxels the splats actually colored
       r += weight * color[i * 3]; gr += weight * color[i * 3 + 1]; b += weight * color[i * 3 + 2]; w += weight;
     }
-    if (w > 0) { colors[v * 3] = r / w; colors[v * 3 + 1] = gr / w; colors[v * 3 + 2] = b / w; }
+    if (w > 0) { out[0] = r / w; out[1] = gr / w; out[2] = b / w; } else { out[0] = out[1] = out[2] = 0.6; }
+    return out;
+  };
+  const splatColor = splatColorSampler(splats, cell, voxelColor);
+
+  if (options.targetTriangles && indices.length / 3 > options.targetTriangles) {
+    ({ positions, indices } = decimate(positions, indices, options.targetTriangles));
+  }
+
+  const vertexCount = positions.length / 3;
+  const colors = new Float32Array(vertexCount * 3);
+  const sampled: Vec3 = [0, 0, 0];
+  for (let v = 0; v < vertexCount; v++) {
+    splatColor([positions[v * 3], positions[v * 3 + 1], positions[v * 3 + 2]], sampled);
+    colors.set(sampled, v * 3);
   }
 
   // meters, centered on the floor footprint, resting on y = 0
@@ -643,12 +682,17 @@ export function buildScanMesh(cloud: SplatCloud, cameras: ScanCamera[], options:
   for (let v = 0; v < vertexCount; v++) {
     for (let k = 0; k < 3; k++) positions[v * 3 + k] = (positions[v * 3 + k] - middle[k]) * metersPerUnit;
   }
+  const local: Vec3 = [0, 0, 0];
 
   return {
     positions,
     normals: computeNormals(positions, indices),
     colors,
     indices,
+    sampleColor(p, out) {
+      for (let k = 0; k < 3; k++) local[k] = p[k] / metersPerUnit + middle[k];
+      return splatColor(local, out);
+    },
     stats: {
       splatsUsed: used,
       groundRemoved,
@@ -659,43 +703,329 @@ export function buildScanMesh(cloud: SplatCloud, cameras: ScanCamera[], options:
   };
 }
 
-/** Bake per-vertex colors into a texture atlas: each triangle owns a 2x2 texel
- *  cell whose texel centers carry its corner colors, so bilinear sampling
- *  reproduces the vertex-color gradient. Apple Quick Look ignores vertex colors
- *  on textured materials; a texture survives every converter. */
-export function bakeColorAtlas(mesh: ScanMesh) {
+/** Color at a surface point straight from the nearby splats (sharper than the
+ *  voxel grid, which only sees one color per voxel); the voxel grid fills in
+ *  where no splat reaches. */
+function splatColorSampler(splats: PreparedSplat[], cell: number, fallback: (p: Vec3, out: Vec3) => Vec3) {
+  const buckets = new Map<number, number[]>();
+  const key = (x: number, y: number, z: number) => ((x + 1024) * 2048 + (y + 1024)) * 2048 + (z + 1024);
+  splats.forEach((splat, i) => {
+    const k = key(Math.floor(splat.position[0] / cell), Math.floor(splat.position[1] / cell), Math.floor(splat.position[2] / cell));
+    const bucket = buckets.get(k);
+    if (bucket) bucket.push(i); else buckets.set(k, [i]);
+  });
+  const minSigma = 0.3 * cell;
+  return (p: Vec3, out: Vec3) => {
+    const bx = Math.floor(p[0] / cell), by = Math.floor(p[1] / cell), bz = Math.floor(p[2] / cell);
+    let r = 0, g = 0, b = 0, w = 0;
+    for (let dz = -1; dz <= 1; dz++) for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      const bucket = buckets.get(key(bx + dx, by + dy, bz + dz));
+      if (!bucket) continue;
+      for (const i of bucket) {
+        const splat = splats[i];
+        const d: Vec3 = [p[0] - splat.position[0], p[1] - splat.position[1], p[2] - splat.position[2]];
+        let m = 0;
+        for (let k = 0; k < 3; k++) {
+          const projected = dot(splat.axes[k], d) / Math.max(splat.sigmas[k], minSigma);
+          m += projected * projected;
+        }
+        if (m > 16) continue;
+        const weight = splat.alpha * Math.exp(-0.5 * m);
+        r += weight * splat.color[0]; g += weight * splat.color[1]; b += weight * splat.color[2]; w += weight;
+      }
+    }
+    if (w < 1e-3) return fallback(p, out);
+    out[0] = r / w; out[1] = g / w; out[2] = b / w;
+    return out;
+  };
+}
+
+/** Quadric error edge collapse (Garland & Heckbert): fewer triangles where
+ *  the surface is flat, detail kept where it bends. Collapses that would flip
+ *  a neighboring face or pinch the surface are refused. */
+export function decimate(positionsIn: Float32Array, indicesIn: Uint32Array, targetTriangles: number) {
+  const vertexCount = positionsIn.length / 3;
+  const pos = Float64Array.from(positionsIn);
+  const faces = Int32Array.from(indicesIn);
+  const faceCount = faces.length / 3;
+  const faceAlive = new Uint8Array(faceCount).fill(1);
+  let aliveFaces = faceCount;
+  const quadric = new Float64Array(vertexCount * 10);
+  const vertexFaces: number[][] = Array.from({ length: vertexCount }, () => []);
+  const vertexAlive = new Uint8Array(vertexCount).fill(1);
+  const version = new Uint32Array(vertexCount);
+
+  const faceNormal = (a: number, b: number, c: number, out: number[]) => {
+    const ux = pos[b * 3] - pos[a * 3], uy = pos[b * 3 + 1] - pos[a * 3 + 1], uz = pos[b * 3 + 2] - pos[a * 3 + 2];
+    const vx = pos[c * 3] - pos[a * 3], vy = pos[c * 3 + 1] - pos[a * 3 + 1], vz = pos[c * 3 + 2] - pos[a * 3 + 2];
+    out[0] = uy * vz - uz * vy; out[1] = uz * vx - ux * vz; out[2] = ux * vy - uy * vx;
+    return out;
+  };
+  const normal = [0, 0, 0];
+  for (let f = 0; f < faceCount; f++) {
+    const a = faces[f * 3], b = faces[f * 3 + 1], c = faces[f * 3 + 2];
+    faceNormal(a, b, c, normal);
+    const area = Math.hypot(normal[0], normal[1], normal[2]);
+    if (area > 1e-20) {
+      const nx = normal[0] / area, ny = normal[1] / area, nz = normal[2] / area;
+      const d = -(nx * pos[a * 3] + ny * pos[a * 3 + 1] + nz * pos[a * 3 + 2]);
+      const plane = [nx * nx, nx * ny, nx * nz, nx * d, ny * ny, ny * nz, ny * d, nz * nz, nz * d, d * d];
+      for (const v of [a, b, c]) for (let k = 0; k < 10; k++) quadric[v * 10 + k] += area * plane[k];
+    }
+    vertexFaces[a].push(f); vertexFaces[b].push(f); vertexFaces[c].push(f);
+  }
+
+  const q = new Float64Array(10);
+  const error = (x: number, y: number, z: number) =>
+    q[0] * x * x + 2 * q[1] * x * y + 2 * q[2] * x * z + 2 * q[3] * x + q[4] * y * y + 2 * q[5] * y * z + 2 * q[6] * y + q[7] * z * z + 2 * q[8] * z + q[9];
+
+  // binary min-heap of candidate collapses, invalidated lazily by vertex versions
+  const heapCost: number[] = [], heapU: number[] = [], heapV: number[] = [], heapVu: number[] = [], heapVv: number[] = [];
+  const heapX: number[] = [], heapY: number[] = [], heapZ: number[] = [];
+  const swap = (i: number, j: number) => {
+    for (const array of [heapCost, heapU, heapV, heapVu, heapVv, heapX, heapY, heapZ]) [array[i], array[j]] = [array[j], array[i]];
+  };
+  const push = (u: number, v: number) => {
+    for (let k = 0; k < 10; k++) q[k] = quadric[u * 10 + k] + quadric[v * 10 + k];
+    const mx = (pos[u * 3] + pos[v * 3]) / 2, my = (pos[u * 3 + 1] + pos[v * 3 + 1]) / 2, mz = (pos[u * 3 + 2] + pos[v * 3 + 2]) / 2;
+    const candidates = [[pos[u * 3], pos[u * 3 + 1], pos[u * 3 + 2]], [pos[v * 3], pos[v * 3 + 1], pos[v * 3 + 2]], [mx, my, mz]];
+    // the quadric's own minimum, when it is well defined and near the edge
+    const det = q[0] * (q[4] * q[7] - q[5] * q[5]) - q[1] * (q[1] * q[7] - q[5] * q[2]) + q[2] * (q[1] * q[5] - q[4] * q[2]);
+    const edge = Math.hypot(pos[u * 3] - pos[v * 3], pos[u * 3 + 1] - pos[v * 3 + 1], pos[u * 3 + 2] - pos[v * 3 + 2]);
+    if (Math.abs(det) > 1e-12 * Math.max(1e-30, (q[0] + q[4] + q[7]) ** 3)) {
+      const bx = -q[3], by = -q[6], bz = -q[8];
+      const x = (bx * (q[4] * q[7] - q[5] * q[5]) - q[1] * (by * q[7] - q[5] * bz) + q[2] * (by * q[5] - q[4] * bz)) / det;
+      const y = (q[0] * (by * q[7] - q[5] * bz) - bx * (q[1] * q[7] - q[5] * q[2]) + q[2] * (q[1] * bz - by * q[2])) / det;
+      const z = (q[0] * (q[4] * bz - by * q[5]) - q[1] * (q[1] * bz - by * q[2]) + bx * (q[1] * q[5] - q[4] * q[2])) / det;
+      if (Math.hypot(x - mx, y - my, z - mz) < edge) candidates.push([x, y, z]);
+    }
+    let best = candidates[0], bestCost = Infinity;
+    for (const candidate of candidates) {
+      const cost = error(candidate[0], candidate[1], candidate[2]);
+      if (cost < bestCost) { bestCost = cost; best = candidate; }
+    }
+    let i = heapCost.length;
+    heapCost.push(Math.max(0, bestCost)); heapU.push(u); heapV.push(v); heapVu.push(version[u]); heapVv.push(version[v]);
+    heapX.push(best[0]); heapY.push(best[1]); heapZ.push(best[2]);
+    while (i > 0) {
+      const parent = (i - 1) >> 1;
+      if (heapCost[parent] <= heapCost[i]) break;
+      swap(i, parent);
+      i = parent;
+    }
+  };
+  const pop = () => {
+    const last = heapCost.length - 1;
+    swap(0, last);
+    const top = { u: heapU[last], v: heapV[last], vu: heapVu[last], vv: heapVv[last], x: heapX[last], y: heapY[last], z: heapZ[last] };
+    for (const array of [heapCost, heapU, heapV, heapVu, heapVv, heapX, heapY, heapZ]) array.pop();
+    let i = 0;
+    for (;;) {
+      const l = 2 * i + 1, r = l + 1;
+      let smallest = i;
+      if (l < heapCost.length && heapCost[l] < heapCost[smallest]) smallest = l;
+      if (r < heapCost.length && heapCost[r] < heapCost[smallest]) smallest = r;
+      if (smallest === i) break;
+      swap(i, smallest);
+      i = smallest;
+    }
+    return top;
+  };
+
+  const neighbors = (v: number) => {
+    const set = new Set<number>();
+    for (const f of vertexFaces[v]) {
+      if (!faceAlive[f]) continue;
+      for (let k = 0; k < 3; k++) if (faces[f * 3 + k] !== v) set.add(faces[f * 3 + k]);
+    }
+    return set;
+  };
+  const seen = new Set<number>();
+  for (let f = 0; f < faceCount; f++) {
+    for (let k = 0; k < 3; k++) {
+      const a = faces[f * 3 + k], b = faces[f * 3 + (k + 1) % 3];
+      const u = Math.min(a, b), v = Math.max(a, b);
+      const id = u * vertexCount + v;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      push(u, v);
+    }
+  }
+  seen.clear();
+
+  const before = [0, 0, 0], after = [0, 0, 0];
+  const flips = (moving: number, other: number, x: number, y: number, z: number) => {
+    const ox = pos[moving * 3], oy = pos[moving * 3 + 1], oz = pos[moving * 3 + 2];
+    for (const f of vertexFaces[moving]) {
+      if (!faceAlive[f]) continue;
+      const a = faces[f * 3], b = faces[f * 3 + 1], c = faces[f * 3 + 2];
+      if (a === other || b === other || c === other) continue; // removed by the collapse
+      faceNormal(a, b, c, before);
+      pos[moving * 3] = x; pos[moving * 3 + 1] = y; pos[moving * 3 + 2] = z;
+      faceNormal(a, b, c, after);
+      pos[moving * 3] = ox; pos[moving * 3 + 1] = oy; pos[moving * 3 + 2] = oz;
+      const lb = Math.hypot(before[0], before[1], before[2]), la = Math.hypot(after[0], after[1], after[2]);
+      if (la < 1e-20 || (before[0] * after[0] + before[1] * after[1] + before[2] * after[2]) < 0.3 * lb * la) return true;
+    }
+    return false;
+  };
+
+  while (aliveFaces > targetTriangles && heapCost.length) {
+    const { u, v, vu, vv, x, y, z } = pop();
+    if (!vertexAlive[u] || !vertexAlive[v] || version[u] !== vu || version[v] !== vv) continue;
+    // link condition: exactly two shared neighbors keeps the surface a manifold
+    const nu = neighbors(u), nv = neighbors(v);
+    let shared = 0;
+    for (const w of nu) if (nv.has(w)) shared++;
+    if (shared !== 2) continue;
+    if (flips(u, v, x, y, z) || flips(v, u, x, y, z)) continue;
+
+    pos[u * 3] = x; pos[u * 3 + 1] = y; pos[u * 3 + 2] = z;
+    for (let k = 0; k < 10; k++) quadric[u * 10 + k] += quadric[v * 10 + k];
+    for (const f of vertexFaces[v]) {
+      if (!faceAlive[f]) continue;
+      const a = faces[f * 3], b = faces[f * 3 + 1], c = faces[f * 3 + 2];
+      if (a === u || b === u || c === u) { faceAlive[f] = 0; aliveFaces--; continue; }
+      for (let k = 0; k < 3; k++) if (faces[f * 3 + k] === v) faces[f * 3 + k] = u;
+      vertexFaces[u].push(f);
+    }
+    vertexFaces[u] = vertexFaces[u].filter((f) => faceAlive[f]);
+    vertexAlive[v] = 0;
+    vertexFaces[v] = [];
+    version[u]++;
+    for (const w of neighbors(u)) push(u, w);
+  }
+
+  const remap = new Int32Array(vertexCount).fill(-1);
+  const outPositions: number[] = [];
+  const outIndices: number[] = [];
+  for (let f = 0; f < faceCount; f++) {
+    if (!faceAlive[f]) continue;
+    for (let k = 0; k < 3; k++) {
+      const v = faces[f * 3 + k];
+      if (remap[v] < 0) { remap[v] = outPositions.length / 3; outPositions.push(pos[v * 3], pos[v * 3 + 1], pos[v * 3 + 2]); }
+      outIndices.push(remap[v]);
+    }
+  }
+  return { positions: new Float32Array(outPositions), indices: new Uint32Array(outIndices) };
+}
+
+/** Bake the surface color into a texture atlas. Every pair of triangles shares
+ *  an N x N texel cell, split along the diagonal with a one-texel gap, and each
+ *  texel is colored from the splats at the 3D point it maps to; texture detail
+ *  no longer depends on how many triangles survived decimation. Bilinear
+ *  samples inside a triangle only ever touch its own texels. Apple Quick Look
+ *  ignores vertex colors on textured materials; a texture survives every
+ *  converter. */
+export function bakeTextureAtlas(mesh: ScanMesh, options: { size?: number; maxSize?: number } = {}) {
   const triangles = mesh.indices.length / 3;
-  const cellsPerRow = Math.ceil(Math.sqrt(triangles));
-  let size = 64;
-  while (size < cellsPerRow * 2) size *= 2;
+  const pairs = Math.ceil(triangles / 2);
+  let size = options.size ?? 1024;
+  const maxSize = options.maxSize ?? 4096;
+  let cellsPerRow = Math.ceil(Math.sqrt(pairs));
+  let n = Math.floor(size / cellsPerRow);
+  while (n < 4 && size < maxSize) {
+    size *= 2;
+    n = Math.floor(size / cellsPerRow);
+  }
+  if (n < 4) throw new Error("Too many triangles for the texture atlas. Choose a lower detail level.");
+  n = Math.min(n, 24);
+  cellsPerRow = Math.floor(size / n);
+
+  // walk triangles and cells in Z-order so atlas neighbors are surface
+  // neighbors: smooth texture that compresses well, and JPEG blocks that
+  // straddle two cells blend similar colors
+  const order = mortonOrder(triangles, (t, k) => {
+    let sum = 0;
+    for (let c = 0; c < 3; c++) sum += mesh.positions[mesh.indices[t * 3 + c] * 3 + k];
+    return sum / 3;
+  });
+  const cellSlots: [number, number][] = [];
+  for (let m = 0; cellSlots.length < pairs; m++) {
+    let x = 0, y = 0;
+    for (let bit = 0; bit < 16; bit++) {
+      x |= ((m >> (2 * bit)) & 1) << bit;
+      y |= ((m >> (2 * bit + 1)) & 1) << bit;
+    }
+    if (x < cellsPerRow && y < cellsPerRow) cellSlots.push([x, y]);
+  }
+
   const pixels = new Uint8ClampedArray(size * size * 4);
+  const indices = new Uint32Array(triangles * 3);
   const positions = new Float32Array(triangles * 9);
   const normals = new Float32Array(triangles * 9);
   const uvs = new Float32Array(triangles * 6);
   const toByte = (value: number) => Math.round(Math.min(1, Math.max(0, value)) * 255);
-  // splat colors are display-referred: keep them as sRGB bytes
-  const texel = [[0, 0], [1, 0], [0, 1]];
+  const corner = (t: number, k: number): Vec3 => {
+    const v = mesh.indices[order[t] * 3 + k];
+    return [mesh.positions[v * 3], mesh.positions[v * 3 + 1], mesh.positions[v * 3 + 2]];
+  };
+  // texel-center coordinates of each half's corners inside a cell, as (column, row)
+  const lower = [[0, 0], [n - 2, 0], [0, n - 2]];
+  const upper = [[n - 1, n - 1], [n - 1, 2], [2, n - 1]];
+  const point: Vec3 = [0, 0, 0];
+  const rgb: Vec3 = [0, 0, 0];
 
-  for (let t = 0; t < triangles; t++) {
-    const cx = (t % cellsPerRow) * 2;
-    const cy = Math.floor(t / cellsPerRow) * 2;
-    const corner: Vec3[] = [];
-    for (let k = 0; k < 3; k++) {
-      const v = mesh.indices[t * 3 + k];
-      positions.set(mesh.positions.subarray(v * 3, v * 3 + 3), t * 9 + k * 3);
-      normals.set(mesh.normals.subarray(v * 3, v * 3 + 3), t * 9 + k * 3);
-      const rgb: Vec3 = [mesh.colors[v * 3], mesh.colors[v * 3 + 1], mesh.colors[v * 3 + 2]];
-      corner.push(rgb);
-      const px = cx + texel[k][0], py = cy + texel[k][1];
-      const p = (py * size + px) * 4;
-      pixels[p] = toByte(rgb[0]); pixels[p + 1] = toByte(rgb[1]); pixels[p + 2] = toByte(rgb[2]); pixels[p + 3] = 255;
-      uvs[t * 6 + k * 2] = (px + 0.5) / size;
-      uvs[t * 6 + k * 2 + 1] = (py + 0.5) / size;
+  for (let pair = 0; pair < pairs; pair++) {
+    const ox = cellSlots[pair][0] * n;
+    const oy = cellSlots[pair][1] * n;
+    for (let half = 0; half < 2; half++) {
+      const t = pair * 2 + half;
+      if (t >= triangles) break;
+      const layout = half ? upper : lower;
+      for (let k = 0; k < 3; k++) {
+        const v = mesh.indices[order[t] * 3 + k];
+        indices[t * 3 + k] = v;
+        positions.set(mesh.positions.subarray(v * 3, v * 3 + 3), t * 9 + k * 3);
+        normals.set(mesh.normals.subarray(v * 3, v * 3 + 3), t * 9 + k * 3);
+        uvs[t * 6 + k * 2] = (ox + layout[k][0] + 0.5) / size;
+        uvs[t * 6 + k * 2 + 1] = (oy + layout[k][1] + 0.5) / size;
+      }
+      const p0 = corner(t, 0), p1 = corner(t, 1), p2 = corner(t, 2);
+      const legs = half ? n - 3 : n - 2;
+      for (let row = 0; row < n; row++) {
+        for (let column = 0; column < n; column++) {
+          const diagonal = column + row;
+          if (half ? diagonal < n : diagonal > n - 1) continue;
+          // affine map from texel to triangle (extrapolates into the gap texels)
+          const s = half ? (n - 1 - row) / legs : column / legs;
+          const r = half ? (n - 1 - column) / legs : row / legs;
+          for (let k = 0; k < 3; k++) point[k] = p0[k] + s * (p1[k] - p0[k]) + r * (p2[k] - p0[k]);
+          mesh.sampleColor(point, rgb);
+          const o = ((oy + row) * size + ox + column) * 4;
+          pixels[o] = toByte(rgb[0]); pixels[o + 1] = toByte(rgb[1]); pixels[o + 2] = toByte(rgb[2]); pixels[o + 3] = 255;
+        }
+      }
     }
-    // fourth texel completes the plane through the three corners
-    const p = ((cy + 1) * size + cx + 1) * 4;
-    for (let c = 0; c < 3; c++) pixels[p + c] = toByte(corner[1][c] + corner[2][c] - corner[0][c]);
-    pixels[p + 3] = 255;
   }
-  return { size, pixels, positions, normals, uvs };
+  // `indices` lists the source mesh's triangles in atlas order; `uvs` follow it
+  return { size, cell: n, pixels, indices, positions, normals, uvs };
+}
+
+/** Indices 0..count-1 sorted along a 3D Z-order curve of the given coordinates. */
+function mortonOrder(count: number, coordinate: (i: number, axis: number) => number) {
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < count; i++) for (let k = 0; k < 3; k++) {
+    const value = coordinate(i, k);
+    lo[k] = Math.min(lo[k], value);
+    hi[k] = Math.max(hi[k], value);
+  }
+  const spread = (value: number) => {
+    let x = value & 0x3ff;
+    x = (x | (x << 16)) & 0x030000ff;
+    x = (x | (x << 8)) & 0x0300f00f;
+    x = (x | (x << 4)) & 0x030c30c3;
+    x = (x | (x << 2)) & 0x09249249;
+    return x;
+  };
+  const codes = new Float64Array(count);
+  for (let i = 0; i < count; i++) {
+    let code = 0;
+    for (let k = 0; k < 3; k++) {
+      const q = Math.floor(((coordinate(i, k) - lo[k]) / ((hi[k] - lo[k]) || 1)) * 1023);
+      code += spread(q) * 2 ** k;
+    }
+    codes[i] = code;
+  }
+  return Array.from({ length: count }, (_, i) => i).sort((a, b) => codes[a] - codes[b]);
 }
