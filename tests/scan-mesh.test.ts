@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bakeTextureAtlas, buildScanMesh, decimate, orbitCenter, type CameraModel, type ScanCamera, type SplatCloud, type Vec3 } from "../pages-src/scan-mesh";
+import { bakeTextureAtlas, buildScanMesh, decimate, orbitCenter, subjectCylinder, type CameraModel, type ScanCamera, type SplatCloud, type Vec3 } from "../pages-src/scan-mesh";
 
 const logit = (p: number) => Math.log(p / (1 - p));
 
@@ -212,4 +212,21 @@ test("a broken density shell does not cave in when the cameras saw a closed surf
   const carved = buildScanMesh(sceneCloud(), orbitCameras(), { ...options, views: cameraModels(orbitCameras()) });
   assert.ok(inward(shellOnly) > 0.05, `the strict threshold should break the shell (${inward(shellOnly)})`);
   assert.ok(inward(carved) < 0.02, `carving should keep the ball solid (${inward(carved)})`);
+});
+
+test("the training region hugs the object's sparse points, not the camera ring", () => {
+  // sparse points as a solver leaves them: some on the ball, many on the table around it
+  const cloud = sceneCloud();
+  const points: Vec3[] = [];
+  for (let i = 0; i < cloud.n; i += 7) points.push([cloud.data[i * 16], cloud.data[i * 16 + 1], cloud.data[i * 16 + 2]]);
+  const cameras = orbitCameras();
+  const region = subjectCylinder(points, cameras);
+  // local = rotation · (world − center); the cameras' ring is 0.8 m out
+  const local = (p: Vec3) => [0, 1, 2].map((r) => region.rotation[r * 3] * (p[0] - region.center[0]) + region.rotation[r * 3 + 1] * (p[1] - region.center[1]) + region.rotation[r * 3 + 2] * (p[2] - region.center[2]));
+  assert.ok(region.radius > RADIUS * 1.15 && region.radius < 0.36, `radius ${region.radius}`);
+  // every ball point is inside, with room to spare
+  for (let i = 0; i < 6000; i += 13) {
+    const [x, y, z] = local([cloud.data[i * 16], cloud.data[i * 16 + 1], cloud.data[i * 16 + 2]]);
+    assert.ok(Math.hypot(x, z) < region.radius && y > region.bottom && y < region.top, `ball point ${i} outside`);
+  }
 });

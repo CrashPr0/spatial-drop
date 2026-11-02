@@ -1,6 +1,7 @@
 import { BufferAttribute, BufferGeometry, CanvasTexture, LinearFilter, Mesh, MeshStandardMaterial, SRGBColorSpace } from "three";
 import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
-import type { ScanCamera, Vec3 } from "./scan-mesh";
+import { cropToSubject } from "./scan-crop";
+import { subjectCylinder, type ScanCamera, type Vec3 } from "./scan-mesh";
 import { buildUsdz } from "./scan-usdz";
 import type { MeshJob, MeshWorkerMessage, ViewMeta } from "./scan-worker";
 
@@ -52,6 +53,19 @@ function runMeshWorker(job: MeshJob, onProgress: (message: Extract<MeshWorkerMes
     worker.onerror = (event) => { finish(); reject(new Error(event.message || "The meshing worker failed.")); };
     worker.postMessage(job);
   });
+}
+
+/** Solver cameras (world-to-camera R, t; OpenCV axes) as the mesher's orbit cameras. */
+function orbitCameras(cams: { R: number[]; t: number[] }[]): ScanCamera[] {
+  return cams.map(({ R, t }) => ({
+    position: [
+      -(R[0] * t[0] + R[3] * t[1] + R[6] * t[2]),
+      -(R[1] * t[0] + R[4] * t[1] + R[7] * t[2]),
+      -(R[2] * t[0] + R[5] * t[1] + R[8] * t[2]),
+    ] as Vec3,
+    forward: [R[6], R[7], R[8]] as Vec3,
+    up: [-R[3], -R[4], -R[5]] as Vec3,
+  }));
 }
 
 const isPhone = () => matchMedia("(any-pointer: coarse)").matches && Math.min(screen.width, screen.height) <= 820;
@@ -129,6 +143,7 @@ export function setupScanLab() {
   let splat: { data: Float32Array; n: number; dc: "sigmoid" | "sh" } | null = null;
   let cameras: ScanCamera[] = [];
   let viewMetas: ViewMeta[] = [];
+  let fullIntrinsics = new Map<number, Pick<ViewMeta, "featureWidth" | "featureHeight" | "cx" | "cy">>();
   let scannedPhotos: File[] = [];
   let glbBlob: Blob | null = null;
   let glbUrl = "";
@@ -373,6 +388,17 @@ export function setupScanLab() {
         throw new Error(`Only ${placed} of ${photos.length} photos could be placed. Rescan with more overlap: move slowly around the object.`);
       }
       setProgress(STAGE_LABELS.seed, 48, `${placed} cameras solved. Starting the splat trainer…`);
+      // texturing and carving project into the full photos: keep their intrinsics
+      fullIntrinsics = new Map(created.recon.cams.map((camera: { imgIdx: number; cx?: number; cy?: number }) => {
+        const frame = created.frames[camera.imgIdx];
+        return [camera.imgIdx, { featureWidth: frame.fw, featureHeight: frame.fh, cx: camera.cx, cy: camera.cy }];
+      }));
+      // train on the object, not the room: crop every photo to the subject's region
+      const region = subjectCylinder(
+        created.recon.points.map((point: { X: number[] }) => point.X as Vec3),
+        orbitCameras(created.recon.cams),
+      );
+      cropToSubject(created.frames, created.recon.cams, region);
       await created.seed();
       if (session !== created) return;
       const first = created.trainer.camMeta[0];
@@ -384,6 +410,10 @@ export function setupScanLab() {
       created.view.lookThrough(0);
       lookTimer = window.setInterval(() => {
         look = (look + 1) % created.trainer.camMeta.length;
+        // cropped training views differ in size
+        const meta = created.trainer.camMeta[look];
+        liveCanvas.width = meta.w;
+        liveCanvas.height = meta.h;
         created.view.lookThrough(look);
       }, 2500);
       setState("training");
@@ -407,21 +437,15 @@ export function setupScanLab() {
     try {
       const raw = await current.exportRawState();
       splat = { data: Float32Array.from(raw.data.subarray(0, raw.n * 16)), n: raw.n, dc: current.trainer.dcMode };
-      const { camPosition } = await loadSplat();
-      cameras = current.recon.cams.map((camera: { R: number[]; t: number[] }) => {
-        const R = camera.R;
-        return {
-          position: camPosition(camera) as Vec3,
-          forward: [R[6], R[7], R[8]] as Vec3,
-          up: [-R[3], -R[4], -R[5]] as Vec3,
-        };
-      });
+      cameras = orbitCameras(current.recon.cams);
       const recon = current.recon;
       viewMetas = recon.cams.map((camera: { imgIdx: number; R: number[]; t: number[]; f: number; fy?: number; cx?: number; cy?: number }) => {
         const frame = current.frames[camera.imgIdx];
+        // the uncropped camera, as the photos are
+        const full = fullIntrinsics.get(camera.imgIdx) ?? { featureWidth: frame.fw, featureHeight: frame.fh, cx: camera.cx, cy: camera.cy };
         return {
-          name: frame.name, R: Array.from(camera.R), t: Array.from(camera.t), f: camera.f, fy: camera.fy, cx: camera.cx, cy: camera.cy,
-          featureWidth: frame.fw, featureHeight: frame.fh, k1: recon.k1 ?? 0, k2: recon.k2 ?? 0,
+          name: frame.name, R: Array.from(camera.R), t: Array.from(camera.t), f: camera.f, fy: camera.fy,
+          k1: recon.k1 ?? 0, k2: recon.k2 ?? 0, ...full,
         };
       });
       current.pause();
