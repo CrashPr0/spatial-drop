@@ -336,14 +336,21 @@ export function setupScanLab() {
 
     const { createSession, focalPxFrom35, solveTierOpts } = await loadSplat();
     const phone = isPhone();
-    const maxIters = phone ? 3500 : 7000;
+    // The splat only has to get the shape right (color comes from the photos), and
+    // that settles early. Measured on the synthetic orbit, three runs each:
+    // 2000 steps from 20k splats: 8.5-9.1 s, 2.7-3.1 mm, 25.1-25.2 dB held out;
+    // 7000 steps from the 60k default: 60-68 s, 3.0-4.2 mm, 24.1-24.3 dB.
+    const maxIters = 2000;
     const created = createSession({
       maxIters,
       holdout: -1,
       evalHoldEvery: 1e9,
-      ...(phone ? { initTarget: 60000, lowMem: true } : {}),
+      initTarget: 20000,
+      ...(phone ? { lowMem: true } : {}),
       sfm: { ...solveTierOpts("quick"), uiYield: true, ...(phone ? { workers: 3 } : {}) },
       trainer: { maxSplats: phone ? 300000 : 600000, capMult: 8 },
+      // the browser harness (tests/browser/scan-orbit.js) tries other settings through this
+      ...(import.meta.env.DEV ? (window as { spatialDropSessionOverrides?: object }).spatialDropSessionOverrides : {}),
     });
     session = created;
     created.on("stage", (event: { stage: string; done: number; total: number }) => {
