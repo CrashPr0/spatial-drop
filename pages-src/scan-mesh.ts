@@ -18,6 +18,18 @@ export interface ScanCamera {
   up: Vec3;
 }
 
+/** A solved camera in the reconstruction's world frame (OpenCV axes, pixels of a width x height image). */
+export interface CameraModel {
+  R: ArrayLike<number>;
+  t: ArrayLike<number>;
+  fx: number;
+  fy: number;
+  cx: number;
+  cy: number;
+  width: number;
+  height: number;
+}
+
 export interface MeshOptions {
   /** voxels along the longest side of the subject */
   resolution?: number;
@@ -31,6 +43,8 @@ export interface MeshOptions {
   smoothing?: number;
   /** decimate the surface down to about this many triangles */
   targetTriangles?: number;
+  /** solved cameras: carve the solid from what they see instead of trusting the splat to form a closed shell */
+  views?: CameraModel[];
 }
 
 export interface ScanMesh {
@@ -153,7 +167,52 @@ function findGround(points: Vec3[], tolerance: number) {
     for (const p of sample) if (Math.abs(dot(normal, p) - offset) < tolerance) inliers++;
     if (!best || inliers > best.inliers) best = { normal, offset, inliers };
   }
-  return best && best.inliers >= 0.08 * sample.length ? best : null;
+  if (!best || best.inliers < 0.08 * sample.length) return null;
+  // three random points only roughly orient the plane, and a tilted ground tilts the
+  // whole model (2.5 degrees moved a 33 cm high sphere 1.5 cm sideways): refit it to
+  // every inlier by least squares, twice so the inlier set follows the better plane
+  for (let pass = 0; pass < 2; pass++) {
+    const inliers = sample.filter((p) => Math.abs(dot(best!.normal, p) - best!.offset) < tolerance);
+    const mean: Vec3 = [0, 0, 0];
+    for (const p of inliers) for (let k = 0; k < 3; k++) mean[k] += p[k] / inliers.length;
+    const covariance = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+    for (const p of inliers) {
+      const d = sub(p, mean);
+      for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) covariance[r * 3 + c] += d[r] * d[c];
+    }
+    let normal = smallestEigenvector(covariance);
+    if (normal[1] < 0) normal = scale(normal, -1);
+    best = { normal, offset: dot(normal, mean), inliers: inliers.length };
+  }
+  return best;
+}
+
+/** Eigenvector of the smallest eigenvalue of a symmetric 3x3 matrix (cyclic Jacobi). */
+function smallestEigenvector(matrix: number[]): Vec3 {
+  const a = matrix.slice();
+  const v = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+  for (let sweep = 0; sweep < 30; sweep++) {
+    for (const [p, q] of [[0, 1], [0, 2], [1, 2]]) {
+      if (Math.abs(a[p * 3 + q]) < 1e-18) continue;
+      const theta = 0.5 * Math.atan2(2 * a[p * 3 + q], a[q * 3 + q] - a[p * 3 + p]);
+      const c = Math.cos(theta), s = Math.sin(theta);
+      for (let k = 0; k < 3; k++) {
+        const akp = a[k * 3 + p], akq = a[k * 3 + q];
+        a[k * 3 + p] = c * akp - s * akq; a[k * 3 + q] = s * akp + c * akq;
+      }
+      for (let k = 0; k < 3; k++) {
+        const apk = a[p * 3 + k], aqk = a[q * 3 + k];
+        a[p * 3 + k] = c * apk - s * aqk; a[q * 3 + k] = s * apk + c * aqk;
+      }
+      for (let k = 0; k < 3; k++) {
+        const vkp = v[k * 3 + p], vkq = v[k * 3 + q];
+        v[k * 3 + p] = c * vkp - s * vkq; v[k * 3 + q] = s * vkp + c * vkq;
+      }
+    }
+  }
+  const diagonal = [a[0], a[4], a[8]];
+  const i = diagonal.indexOf(Math.min(...diagonal));
+  return normalize([v[i], v[3 + i], v[6 + i]]);
 }
 
 interface PreparedSplat {
@@ -203,7 +262,8 @@ export function prepareSubject(cloud: SplatCloud, cameras: ScanCamera[], options
   for (let i = 0; i < n; i++) {
     const o = i * STRIDE;
     const alpha = sigmoid(data[o + 13]);
-    if (alpha < 0.15) continue;
+    // faint splats matter: flat faces are often many layered low-opacity Gaussians
+    if (alpha < 0.03) continue;
     const local = apply(basis, sub([data[o], data[o + 1], data[o + 2]], center));
     if (Math.hypot(local[0], local[2]) > radius || Math.abs(local[1]) > reach) continue;
     let qw = data[o + 6], qx = data[o + 7], qy = data[o + 8], qz = data[o + 9];
@@ -228,6 +288,7 @@ export function prepareSubject(cloud: SplatCloud, cameras: ScanCamera[], options
   }
 
   let floor = -Infinity;
+  let groundY = -Infinity;
   let groundRemoved = false;
   let level = [1, 0, 0, 0, 1, 0, 0, 0, 1];
   if (options.removeGround !== false) {
@@ -241,13 +302,15 @@ export function prepareSubject(cloud: SplatCloud, cameras: ScanCamera[], options
         splat.position = apply(level, splat.position);
         splat.axes = splat.axes.map((axis) => apply(level, axis)) as [Vec3, Vec3, Vec3];
       }
+      // cut a little above the plane so table splats stay out; the base is rebuilt down to the plane later
+      groundY = ground.offset;
       floor = ground.offset + 0.06 * radius;
       groundRemoved = true;
     }
   }
   const subject = splats.filter((splat) => splat.position[1] > floor);
   // local = level · basis · (world − center)
-  return { splats: subject, radius, floor, groundRemoved, transform: { center: center as Vec3, basis, level } };
+  return { splats: subject, radius, floor, groundY, groundRemoved, transform: { center: center as Vec3, basis, level } };
 }
 
 interface Grid {
@@ -350,8 +413,14 @@ function solidify(occupied: Uint8Array, grid: Grid, floorLayer: number, closing 
     }
   }
 
-  // opening: erode one voxel so thin sheets (leftover table, wall slivers)
-  // detach from the body, pick the body, then grow it back inside the solid
+  return keepBody(solid, grid);
+}
+
+/** Opening: erode one voxel so thin sheets (leftover table, wall slivers)
+ *  detach from the body, pick the body, then grow it back inside the solid. */
+function keepBody(solid: Uint8Array, grid: Grid) {
+  const [nx, ny, nz] = grid.dims;
+  const total = nx * ny * nz;
   const eroded = new Uint8Array(total);
   for (let z = 1; z < nz - 1; z++) for (let y = 1; y < ny - 1; y++) for (let x = 1; x < nx - 1; x++) {
     const i = index(grid, x, y, z);
@@ -517,9 +586,134 @@ function computeNormals(positions: Float32Array, indices: Uint32Array) {
   return normals;
 }
 
+interface LocalView {
+  R: number[];
+  t: Vec3;
+  fx: number;
+  fy: number;
+  cx: number;
+  cy: number;
+  width: number;
+  height: number;
+}
+
+/** Depth at which each pixel's front-to-back alpha compositing of the splats
+ *  becomes more than half opaque (Infinity where it never does). This is the
+ *  surface the trained splat actually shows the camera, even when it is made
+ *  of many faint Gaussians that no density threshold would call solid. */
+function compositeDepth(splats: PreparedSplat[], view: LocalView) {
+  const { R, t, fx, fy, cx, cy, width, height } = view;
+  const transmittance = new Float32Array(width * height).fill(1);
+  const depth = new Float32Array(width * height).fill(Infinity);
+  const projected: { z: number; i: number }[] = [];
+  const camera = splats.map((splat, i) => {
+    const p = splat.position;
+    const c: Vec3 = [
+      R[0] * p[0] + R[1] * p[1] + R[2] * p[2] + t[0],
+      R[3] * p[0] + R[4] * p[1] + R[5] * p[2] + t[1],
+      R[6] * p[0] + R[7] * p[1] + R[8] * p[2] + t[2],
+    ];
+    if (c[2] > 1e-4) projected.push({ z: c[2], i });
+    return c;
+  });
+  projected.sort((a, b) => a.z - b.z);
+  for (const { z, i } of projected) {
+    const splat = splats[i];
+    const [x, y] = camera[i];
+    // EWA: 2D covariance of the projected Gaussian, plus a little pixel dilation
+    const j00 = fx / z, j02 = -fx * x / (z * z), j11 = fy / z, j12 = -fy * y / (z * z);
+    let a = 0.3, b = 0, c = 0.3;
+    for (let k = 0; k < 3; k++) {
+      const axis = splat.axes[k];
+      const ax = R[0] * axis[0] + R[1] * axis[1] + R[2] * axis[2];
+      const ay = R[3] * axis[0] + R[4] * axis[1] + R[5] * axis[2];
+      const az = R[6] * axis[0] + R[7] * axis[1] + R[8] * axis[2];
+      const u = (j00 * ax + j02 * az) * splat.sigmas[k];
+      const v = (j11 * ay + j12 * az) * splat.sigmas[k];
+      a += u * u; b += u * v; c += v * v;
+    }
+    const det = a * c - b * b;
+    if (det <= 0) continue;
+    const ia = c / det, ib = -b / det, ic = a / det;
+    const mx = fx * x / z + cx, my = fy * y / z + cy;
+    const extent = Math.min(64, Math.ceil(3 * Math.sqrt(Math.max(a, c))));
+    const x0 = Math.max(0, Math.floor(mx - extent)), x1 = Math.min(width - 1, Math.ceil(mx + extent));
+    const y0 = Math.max(0, Math.floor(my - extent)), y1 = Math.min(height - 1, Math.ceil(my + extent));
+    for (let py = y0; py <= y1; py++) {
+      for (let px = x0; px <= x1; px++) {
+        const pixel = py * width + px;
+        const remaining = transmittance[pixel];
+        if (remaining <= 0.5) continue;
+        const dx = px + 0.5 - mx, dy = py + 0.5 - my;
+        const alpha = Math.min(0.99, splat.alpha * Math.exp(-0.5 * (ia * dx * dx + 2 * ib * dx * dy + ic * dy * dy)));
+        if (alpha < 1 / 255) continue;
+        const next = remaining * (1 - alpha);
+        if (next <= 0.5) depth[pixel] = z;
+        transmittance[pixel] = next;
+      }
+    }
+  }
+  return depth;
+}
+
+/** Space carving: a voxel is empty if any camera sees past it, either in
+ *  front of the surface it shows at that pixel or beside the subject's
+ *  silhouette. Whatever no camera can see through is solid, which fills the
+ *  inside and the unphotographed underside without needing a closed shell. */
+function carveFromViews(
+  splats: PreparedSplat[],
+  transform: { center: Vec3; basis: number[]; level: number[] },
+  grid: Grid,
+  views: CameraModel[],
+  floorVoxel: number,
+) {
+  const [nx, ny, nz] = grid.dims;
+  const total = nx * ny * nz;
+  const solid = new Uint8Array(total);
+  for (let i = 0; i < total; i++) if (Math.floor(i / nx) % ny >= floorVoxel) solid[i] = 1;
+  // local = L (world − center) with L = level · basis, so a camera's local pose is R Lᵀ, R center + t
+  const L = [0, 1, 2].flatMap((r) => [0, 1, 2].map((c) =>
+    transform.level[r * 3] * transform.basis[c] + transform.level[r * 3 + 1] * transform.basis[3 + c] + transform.level[r * 3 + 2] * transform.basis[6 + c]));
+  const margin = 1.2 * grid.cell;
+  for (const view of views) {
+    const scale = Math.min(1, 320 / view.width);
+    const R = [0, 1, 2].flatMap((r) => [0, 1, 2].map((c) => view.R[r * 3] * L[c * 3] + view.R[r * 3 + 1] * L[c * 3 + 1] + view.R[r * 3 + 2] * L[c * 3 + 2]));
+    const C = transform.center;
+    const t: Vec3 = [0, 1, 2].map((r) => view.R[r * 3] * C[0] + view.R[r * 3 + 1] * C[1] + view.R[r * 3 + 2] * C[2] + view.t[r]) as Vec3;
+    const local: LocalView = {
+      R, t, fx: view.fx * scale, fy: view.fy * scale, cx: view.cx * scale, cy: view.cy * scale,
+      width: Math.round(view.width * scale), height: Math.round(view.height * scale),
+    };
+    // a pixel only counts as "missed the subject" if its neighbors missed it too:
+    // voxels at the silhouette edge otherwise land on a miss pixel and get notched away
+    const raw = compositeDepth(splats, local);
+    const depth = new Float32Array(raw.length);
+    for (let y = 0; y < local.height; y++) for (let x = 0; x < local.width; x++) {
+      let nearest = Infinity;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const X = x + dx, Y = y + dy;
+        if (X >= 0 && Y >= 0 && X < local.width && Y < local.height) nearest = Math.min(nearest, raw[Y * local.width + X]);
+      }
+      depth[y * local.width + x] = nearest;
+    }
+    for (let z = 0; z < nz; z++) for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
+      const i = index(grid, x, y, z);
+      if (!solid[i]) continue;
+      const px = grid.origin[0] + x * grid.cell, py = grid.origin[1] + y * grid.cell, pz = grid.origin[2] + z * grid.cell;
+      const cz = R[6] * px + R[7] * py + R[8] * pz + t[2];
+      if (cz <= 1e-4) continue;
+      const u = Math.floor((local.fx * (R[0] * px + R[1] * py + R[2] * pz + t[0])) / cz + local.cx);
+      const v = Math.floor((local.fy * (R[3] * px + R[4] * py + R[5] * pz + t[1])) / cz + local.cy);
+      if (u < 0 || v < 0 || u >= local.width || v >= local.height) continue;
+      if (cz < depth[v * local.width + u] - margin) solid[i] = 0;
+    }
+  }
+  return solid;
+}
+
 export function buildScanMesh(cloud: SplatCloud, cameras: ScanCamera[], options: MeshOptions = {}): ScanMesh {
   const resolution = options.resolution ?? 96;
-  const { splats, groundRemoved, floor, transform } = prepareSubject(cloud, cameras, options);
+  const { splats, groundRemoved, floor, groundY, transform } = prepareSubject(cloud, cameras, options);
   if (splats.length < 50) throw new Error("Too little of the scan landed on the subject. Widen the crop or rescan closer to the object.");
 
   // grid around the robust extent of the subject (ignores the last stray splats)
@@ -529,7 +723,7 @@ export function buildScanMesh(cloud: SplatCloud, cameras: ScanCamera[], options:
     lo[k] = quantile(values, 0.002);
     hi[k] = quantile(values, 0.998);
   }
-  if (groundRemoved) lo[1] = Math.max(lo[1], floor);
+  if (groundRemoved) lo[1] = Math.max(lo[1], groundY);
   const extent = Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) || 1;
   const cell = extent / (resolution - 10);
   const grid: Grid = {
@@ -603,7 +797,25 @@ export function buildScanMesh(cloud: SplatCloud, cameras: ScanCamera[], options:
     const y = Math.floor(i / nx) % ny;
     if (blurred[i] > iso && y >= floorVoxel) occupied[i] = 1;
   }
+  // The density shell alone breaks where the splat shows a surface through many
+  // faint Gaussians: its fill leaks through the gaps and leaves pits (measured
+  // on the synthetic orbit: 6 mm mean error with every splat, 14-16 mm once the
+  // faint ones drop out). Carving from the cameras does not need a closed shell,
+  // and the union keeps the density's detail where the shell is sound.
   const solid = solidify(occupied, grid, floorVoxel);
+  if (options.views?.length) {
+    const carved = carveFromViews(splats, transform, grid, options.views, floorVoxel);
+    for (let i = 0; i < total; i++) solid[i] |= carved[i];
+    keepBody(solid, grid);
+  }
+  if (groundRemoved) {
+    // the cut above the table left the base short: extend its footprint straight down to the ground
+    const groundVoxel = Math.max(0, Math.round((groundY - grid.origin[1]) / cell));
+    for (let z = 0; z < nz; z++) for (let x = 0; x < nx; x++) {
+      if (!solid[index(grid, x, floorVoxel, z)]) continue;
+      for (let y = groundVoxel; y < floorVoxel; y++) solid[index(grid, x, y, z)] = 1;
+    }
+  }
 
   // keep a clear margin so the blurred field is zero on the border and the surface closes
   const field = new Float32Array(total);
@@ -688,9 +900,11 @@ export function buildScanMesh(cloud: SplatCloud, cameras: ScanCamera[], options:
       max[k] = Math.max(max[k], positions[v * 3 + k]);
     }
   }
-  const height = max[1] - min[1] || 1;
+  // measured from the ground plane when there is one: that is where the real object stands
+  const bottom = groundRemoved ? groundY : min[1];
+  const height = max[1] - bottom || 1;
   const metersPerUnit = (options.heightMeters ?? 0.3) / height;
-  const middle: Vec3 = [(min[0] + max[0]) / 2, min[1], (min[2] + max[2]) / 2];
+  const middle: Vec3 = [(min[0] + max[0]) / 2, bottom, (min[2] + max[2]) / 2];
   for (let v = 0; v < vertexCount; v++) {
     for (let k = 0; k < 3; k++) positions[v * 3 + k] = (positions[v * 3 + k] - middle[k]) * metersPerUnit;
   }
@@ -717,7 +931,7 @@ export function buildScanMesh(cloud: SplatCloud, cameras: ScanCamera[], options:
       groundRemoved,
       voxels: grid.dims,
       triangles: indices.length / 3,
-      sizeMeters: [(max[0] - min[0]) * metersPerUnit, height * metersPerUnit, (max[2] - min[2]) * metersPerUnit],
+      sizeMeters: [(max[0] - min[0]) * metersPerUnit, (max[1] - min[1]) * metersPerUnit, (max[2] - min[2]) * metersPerUnit],
     },
   };
 }

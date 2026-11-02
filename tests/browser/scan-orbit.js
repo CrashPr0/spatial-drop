@@ -75,3 +75,109 @@ window.scanStatus = () => ({
 });
 window.loadSaved = () => new Promise((res) => { const r = indexedDB.open('scan-dev', 1); r.onupgradeneeded = () => r.result.createObjectStore('k'); r.onsuccess = () => { const g = r.result.transaction('k').objectStore('k').get('last'); g.onsuccess = () => res(g.result); }; });
 window.saveScan = () => new Promise((res, rej) => { const s = window.spatialDropScan; const ses = s.session; const names = ses.recon.cams.map((k) => ses.frames[k.imgIdx].name); const r = indexedDB.open('scan-dev', 1); r.onupgradeneeded = () => r.result.createObjectStore('k'); r.onsuccess = () => { const tx = r.result.transaction('k', 'readwrite'); tx.objectStore('k').put({ data: s.splat.data, n: s.splat.n, dc: s.splat.dc, cameras: s.cameras, viewMetas: s.viewMetas, names }, 'last'); tx.oncomplete = () => res(true); tx.onerror = rej; }; });
+
+// Signed distance to the true scene (meters, +Y up, floor at 0), matching a mesh built with heightMeters: 0.41.
+const sdfBox = (p) => {
+  const c = Math.cos(-0.5), s = Math.sin(-0.5);
+  const x = c * p[0] + s * p[2], z = -s * p[0] + c * p[2], y = p[1] - 0.13;
+  const q = [Math.abs(x) - 0.09, Math.abs(y) - 0.13, Math.abs(z) - 0.07];
+  return Math.hypot(Math.max(q[0], 0), Math.max(q[1], 0), Math.max(q[2], 0)) + Math.min(Math.max(q[0], q[1], q[2]), 0);
+};
+const groundTruthSdf = (p) => Math.min(sdfBox(p), Math.hypot(p[0], p[1] - 0.33, p[2]) - 0.08);
+
+/** Shape error of a scan mesh against the known scene, after the best turn and shift about +Y. */
+window.shapeError = (mesh) => {
+  const P = mesh.positions, V = P.length / 3;
+  const cost = (rot, dx, dz) => {
+    const c = Math.cos(rot), s = Math.sin(rot); let sum = 0;
+    for (let v = 0; v < V; v += 13) { const x = P[v * 3], z = P[v * 3 + 2]; sum += Math.min(0.02, Math.abs(groundTruthSdf([c * x + s * z + dx, P[v * 3 + 1], -s * x + c * z + dz]))); }
+    return sum;
+  };
+  let best = { c: Infinity, rot: 0, dx: 0, dz: 0 };
+  for (let rot = -Math.PI; rot < Math.PI; rot += 0.04) { const c = cost(rot, 0, 0); if (c < best.c) best = { c, rot, dx: 0, dz: 0 }; }
+  for (let it = 0; it < 3; it++) {
+    const r0 = best.rot;
+    for (let rot = r0 - 0.04; rot <= r0 + 0.04; rot += 0.01) for (let dx = -0.03; dx <= 0.03; dx += 0.005) for (let dz = -0.03; dz <= 0.03; dz += 0.005) {
+      const c = cost(rot, dx, dz); if (c < best.c) best = { c, rot, dx, dz };
+    }
+  }
+  const c = Math.cos(best.rot), s = Math.sin(best.rot); const d = [];
+  for (let v = 0; v < V; v++) { const x = P[v * 3], z = P[v * 3 + 2]; d.push(groundTruthSdf([c * x + s * z + best.dx, P[v * 3 + 1], -s * x + c * z + best.dz])); }
+  const abs = d.map(Math.abs).sort((a, b) => a - b);
+  return {
+    meanMm: +(abs.reduce((a, b) => a + b, 0) / abs.length * 1000).toFixed(2),
+    medianMm: +(abs[abs.length >> 1] * 1000).toFixed(1),
+    p95Mm: +(abs[Math.floor(abs.length * 0.95)] * 1000).toFixed(1),
+    dentsOver4mm: +(d.filter((x) => x < -0.004).length / V * 100).toFixed(1),
+    bulgesOver4mm: +(d.filter((x) => x > 0.004).length / V * 100).toFixed(1),
+  };
+};
+/** Camera models for buildScanMesh's `views` option from saved view metadata. */
+window.cameraModels = (metas) => metas.map((m) => ({ R: m.R, t: m.t, fx: m.f, fy: m.fy ?? m.f, cx: m.cx ?? m.featureWidth / 2, cy: m.cy ?? m.featureHeight / 2, width: m.featureWidth, height: m.featureHeight }));
+
+/** Overlay horizontal slices of meshes (red) on the true outline (green): { label: mesh } */
+window.crossSections = (meshes, heights = [[0.13, 'box mid'], [0.33, 'sphere mid']]) => {
+  document.getElementById('cmp')?.remove();
+  const box = [[-0.09, -0.07], [0.09, -0.07], [0.09, 0.07], [-0.09, 0.07]].map(([x, z]) => [Math.cos(0.5) * x + Math.sin(0.5) * z, -Math.sin(0.5) * x + Math.cos(0.5) * z]);
+  const S = (v) => (v * 1100 + 160).toFixed(1);
+  let html = '';
+  for (const [name, mesh] of Object.entries(meshes)) {
+    const P = mesh.positions;
+    let best = null;
+    for (let rot = -Math.PI; rot < Math.PI; rot += 0.02) {
+      const c = Math.cos(rot), s = Math.sin(rot); let sum = 0;
+      for (let v = 0; v < P.length / 3; v += 17) {
+        if (Math.abs(P[v * 3 + 1] - 0.13) > 0.05) continue;
+        const X = c * P[v * 3] + s * P[v * 3 + 2], Z = -s * P[v * 3] + c * P[v * 3 + 2];
+        const bx = Math.cos(-0.5) * X + Math.sin(-0.5) * Z, bz = -Math.sin(-0.5) * X + Math.cos(-0.5) * Z;
+        sum += Math.abs(Math.max(Math.abs(bx) - 0.09, Math.abs(bz) - 0.07));
+      }
+      if (!best || sum < best.sum) best = { sum, rot };
+    }
+    const c = Math.cos(best.rot), s = Math.sin(best.rot);
+    for (const [h, label] of heights) {
+      const pts = [];
+      for (let v = 0; v < P.length / 3; v++) if (Math.abs(P[v * 3 + 1] - h) <= 0.004) pts.push([c * P[v * 3] + s * P[v * 3 + 2], -s * P[v * 3] + c * P[v * 3 + 2]]);
+      const truth = h < 0.2 ? `<polygon points="${box.map(([x, z]) => `${S(x)},${S(z)}`).join(' ')}" fill="none" stroke="#0a0" stroke-width="2"/>` : `<circle cx="${S(0)}" cy="${S(0)}" r="88" fill="none" stroke="#0a0" stroke-width="2"/>`;
+      html += `<figure style="margin:0;color:#fff;font:11px monospace"><svg viewBox="0 0 320 320" style="width:100%;background:#fff">${truth}${pts.map(([x, z]) => `<circle cx="${S(x)}" cy="${S(z)}" r="1.3" fill="#c00"/>`).join('')}</svg><br>${name} · ${label}</figure>`;
+    }
+  }
+  const wrap = document.createElement('div'); wrap.id = 'cmp';
+  wrap.style.cssText = 'position:fixed;inset:0;z-index:99999;background:#111;display:grid;grid-template-columns:1fr 1fr;gap:6px;padding:6px;overflow:auto';
+  wrap.innerHTML = html; document.body.append(wrap);
+};
+
+/** The crossSections overlay as a PNG data URL (works while the tab is hidden). */
+window.crossSectionPng = (meshes, heights = [0.06, 0.13, 0.22, 0.33]) => {
+  const box = [[-0.09, -0.07], [0.09, -0.07], [0.09, 0.07], [-0.09, 0.07]].map(([x, z]) => [Math.cos(0.5) * x + Math.sin(0.5) * z, -Math.sin(0.5) * x + Math.cos(0.5) * z]);
+  const cell = 220, names = Object.keys(meshes);
+  const canvas = document.createElement('canvas'); canvas.width = cell * heights.length; canvas.height = cell * names.length;
+  const g = canvas.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, canvas.width, canvas.height);
+  names.forEach((name, row) => {
+    const P = meshes[name].positions; let best = null;
+    for (let rot = -Math.PI; rot < Math.PI; rot += 0.02) {
+      const c = Math.cos(rot), s = Math.sin(rot); let sum = 0;
+      for (let v = 0; v < P.length / 3; v += 17) {
+        if (Math.abs(P[v * 3 + 1] - 0.13) > 0.05) continue;
+        const X = c * P[v * 3] + s * P[v * 3 + 2], Z = -s * P[v * 3] + c * P[v * 3 + 2];
+        const bx = Math.cos(-0.5) * X + Math.sin(-0.5) * Z, bz = -Math.sin(-0.5) * X + Math.cos(-0.5) * Z;
+        sum += Math.abs(Math.max(Math.abs(bx) - 0.09, Math.abs(bz) - 0.07));
+      }
+      if (!best || sum < best.sum) best = { sum, rot };
+    }
+    const c = Math.cos(best.rot), s = Math.sin(best.rot);
+    heights.forEach((h, col) => {
+      const ox = col * cell + cell / 2, oy = row * cell + cell / 2, k = 700;
+      g.strokeStyle = '#0a0'; g.lineWidth = 2; g.beginPath();
+      if (h < 0.26) { box.forEach(([x, z], i) => (i ? g.lineTo : g.moveTo).call(g, ox + x * k, oy + z * k)); g.closePath(); }
+      else g.arc(ox, oy, Math.sqrt(Math.max(0, 0.08 ** 2 - (h - 0.33) ** 2)) * k, 0, Math.PI * 2);
+      g.stroke(); g.fillStyle = '#c00';
+      for (let v = 0; v < P.length / 3; v++) {
+        if (Math.abs(P[v * 3 + 1] - h) > 0.003) continue;
+        g.fillRect(ox + (c * P[v * 3] + s * P[v * 3 + 2]) * k - 1, oy + (-s * P[v * 3] + c * P[v * 3 + 2]) * k - 1, 2, 2);
+      }
+      g.fillStyle = '#000'; g.font = '11px monospace'; g.fillText(`${name} y=${h}`, col * cell + 4, row * cell + 12);
+    });
+  });
+  return canvas.toDataURL('image/png');
+};

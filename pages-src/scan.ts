@@ -469,6 +469,11 @@ export function setupScanLab() {
         density: Number(densityInput.value),
         resolution: 104,
         targetTriangles: DETAIL_TRIANGLES[detailInput.value] ?? DETAIL_TRIANGLES.standard,
+        views: viewMetas.map((meta) => ({
+          R: meta.R, t: meta.t, fx: meta.f, fy: meta.fy ?? meta.f,
+          cx: meta.cx ?? meta.featureWidth / 2, cy: meta.cy ?? meta.featureHeight / 2,
+          width: meta.featureWidth, height: meta.featureHeight,
+        })),
       });
       setProgress("Painting the texture", 98.5, "Coloring the surface from the splat…");
       await new Promise((resolve) => setTimeout(resolve, 30));

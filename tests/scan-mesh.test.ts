@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bakeTextureAtlas, buildScanMesh, decimate, orbitCenter, type ScanCamera, type SplatCloud, type Vec3 } from "../pages-src/scan-mesh";
+import { bakeTextureAtlas, buildScanMesh, decimate, orbitCenter, type CameraModel, type ScanCamera, type SplatCloud, type Vec3 } from "../pages-src/scan-mesh";
 
 const logit = (p: number) => Math.log(p / (1 - p));
 
@@ -21,6 +21,8 @@ function orbitCameras(count = 24): ScanCamera[] {
 }
 
 function sceneCloud(): SplatCloud {
+  let seed = 42;
+  const random = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
   const rows: number[][] = [];
   const add = (p: Vec3, rgb: Vec3, logScale: number) =>
     rows.push([...p, logScale, logScale, logScale, 1, 0, 0, 0, ...rgb.map((c) => logit(Math.min(0.99, Math.max(0.01, c)))), logit(0.95), 0, 0]);
@@ -34,7 +36,7 @@ function sceneCloud(): SplatCloud {
   }
   // table plane under it
   for (let i = 0; i < 8000; i++) {
-    const p: Vec3 = [CENTER[0] + (Math.random() - 0.5) * 1.0, TABLE_Y, CENTER[2] + (Math.random() - 0.5) * 1.0];
+    const p: Vec3 = [CENTER[0] + (random() - 0.5) * 1.0, TABLE_Y, CENTER[2] + (random() - 0.5) * 1.0];
     add(p, [0.6, 0.5, 0.3], Math.log(0.01));
   }
   // floaters
@@ -56,19 +58,22 @@ test("splat scene becomes an upright, ground-free, outward-facing mesh", () => {
 
   // ball diameter 0.4 → the width should match the height (ground not included)
   const [width, height, depth] = mesh.stats.sizeMeters;
-  assert.ok(Math.abs(height - 0.4) < 1e-6);
+  // a ball meets the table at a point, so its rebuilt base is a thin column the smoothing partly erodes
+  assert.ok(Math.abs(height - 0.4) < 0.02, `height ${height}`);
   assert.ok(Math.abs(width - 0.4) < 0.06, `width ${width}`);
   assert.ok(Math.abs(depth - 0.4) < 0.06, `depth ${depth}`);
 
-  // resting on y = 0, normals point away from the ball center (y = 0.2)
-  let minY = Infinity, outward = 0;
+  // the top sits at the requested height above the ground, the base on it; normals point away from the ball center (y = 0.2)
+  let minY = Infinity, maxY = -Infinity, outward = 0;
   const vertices = mesh.positions.length / 3;
   for (let v = 0; v < vertices; v++) {
     const p = [mesh.positions[v * 3], mesh.positions[v * 3 + 1] - 0.2, mesh.positions[v * 3 + 2]];
     minY = Math.min(minY, mesh.positions[v * 3 + 1]);
+    maxY = Math.max(maxY, mesh.positions[v * 3 + 1]);
     if (p[0] * mesh.normals[v * 3] + p[1] * mesh.normals[v * 3 + 1] + p[2] * mesh.normals[v * 3 + 2] > 0) outward++;
   }
-  assert.ok(Math.abs(minY) < 1e-6);
+  assert.ok(Math.abs(maxY - 0.4) < 1e-6, `top ${maxY}`);
+  assert.ok(Math.abs(minY) < 0.02, `base ${minY}`);
   assert.ok(outward / vertices > 0.97, `outward ${outward / vertices}`);
 
   // red on top, blue underneath (up is +Y in the output)
@@ -172,4 +177,39 @@ test("texture atlas keeps every triangle's samples inside its own half-cell", ()
     if (atlas.pixels[o] > atlas.pixels[o + 2]) red++;
   }
   assert.ok(red / samples > 0.9, `red ${red}/${samples}`);
+});
+
+/** OpenCV pinhole models for orbitCameras(), as the solver would report them. */
+function cameraModels(cameras: ScanCamera[]): CameraModel[] {
+  return cameras.map(({ position, forward, up }) => {
+    const z = forward;
+    const down: Vec3 = [-up[0], -up[1], -up[2]];
+    const along = down[0] * z[0] + down[1] * z[1] + down[2] * z[2];
+    let y: Vec3 = [down[0] - along * z[0], down[1] - along * z[1], down[2] - along * z[2]];
+    const ly = Math.hypot(...y);
+    y = y.map((v) => v / ly) as Vec3;
+    const x: Vec3 = [y[1] * z[2] - y[2] * z[1], y[2] * z[0] - y[0] * z[2], y[0] * z[1] - y[1] * z[0]];
+    const R = [...x, ...y, ...z];
+    const t = [0, 1, 2].map((r) => -(R[r * 3] * position[0] + R[r * 3 + 1] * position[1] + R[r * 3 + 2] * position[2]));
+    return { R, t, fx: 400, fy: 400, cx: 320, cy: 240, width: 640, height: 480 };
+  });
+}
+
+test("a broken density shell does not cave in when the cameras saw a closed surface", () => {
+  // a strict density threshold (the Density slider at its top end) cuts the shell apart
+  const inward = (mesh: ReturnType<typeof buildScanMesh>) => {
+    // a hollow or pitted ball shows surface whose normals face its center
+    let count = 0;
+    const vertices = mesh.positions.length / 3;
+    for (let v = 0; v < vertices; v++) {
+      const p = [mesh.positions[v * 3], mesh.positions[v * 3 + 1] - 0.2, mesh.positions[v * 3 + 2]];
+      if (p[0] * mesh.normals[v * 3] + p[1] * mesh.normals[v * 3 + 1] + p[2] * mesh.normals[v * 3 + 2] < 0) count++;
+    }
+    return count / vertices;
+  };
+  const options = { heightMeters: 0.4, density: 0.95 };
+  const shellOnly = buildScanMesh(sceneCloud(), orbitCameras(), options);
+  const carved = buildScanMesh(sceneCloud(), orbitCameras(), { ...options, views: cameraModels(orbitCameras()) });
+  assert.ok(inward(shellOnly) > 0.05, `the strict threshold should break the shell (${inward(shellOnly)})`);
+  assert.ok(inward(carved) < 0.02, `carving should keep the ball solid (${inward(carved)})`);
 });
