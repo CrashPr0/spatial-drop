@@ -362,6 +362,13 @@ footer a { color: inherit; text-underline-offset: 3px; }
 .scan-viewport { aspect-ratio: 4 / 3; }
 .scan-viewport.flash::after { content: ""; position: absolute; z-index: 4; inset: 0; border: 6px solid var(--sjsu-gold); animation: scanFlash .35s ease-out forwards; pointer-events: none; }
 @keyframes scanFlash { to { opacity: 0; } }
+.scan-ghost { position: absolute; z-index: 1; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: .45; pointer-events: none; }
+.scan-ghost[hidden], .scan-countdown[hidden], .scan-guide[hidden] { display: none; }
+.scan-countdown { position: absolute; z-index: 5; inset: 0; display: grid; place-content: center; color: white; font: 800 clamp(64px, 18vw, 120px)/1 monospace; text-shadow: 0 4px 24px rgba(0, 0, 0, .6); background: rgba(9, 31, 56, .35); pointer-events: none; }
+.scan-guide { position: absolute; z-index: 5; left: 50%; bottom: 12px; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; max-width: calc(100% - 24px); padding: 8px 12px; background: rgba(9, 31, 56, .82); color: white; font: 800 10px/1.3 monospace; letter-spacing: .05em; text-transform: uppercase; pointer-events: none; }
+.scan-guide.lost { background: rgba(140, 32, 32, .88); }
+.scan-guide.hold { background: var(--sjsu-gold); color: var(--spartan-navy); }
+.scan-guide-ring { flex: none; width: 16px; height: 16px; border-radius: 50%; background: conic-gradient(currentColor calc(var(--fill, 0) * 1turn), rgba(255, 255, 255, .25) 0); }
 .scan-tip { margin: 16px 0 0; color: #c9d9e7; font-size: 12px; line-height: 1.5; }
 .scan-tip b { color: white; }
 .scan-hint { margin: 10px 0 0; color: var(--sjsu-gold); font: 800 9px/1.4 monospace; letter-spacing: .08em; text-transform: uppercase; }
