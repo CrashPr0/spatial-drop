@@ -8,7 +8,7 @@
 //   await spatialDropLoadSplat(await loadSaved(), __orbitFiles);   // re-mesh and re-texture without retraining
 // Ground truth: a 0.18 x 0.26 x 0.14 m box (turned 0.5 rad) with a 0.08 m sphere on top,
 // cameras on rings of radius 0.62 m / 0.55 m at heights 0.22 m / 0.48 m looking at y = 0.17 m.
-window.makeOrbit = async function makeOrbit({ build = true } = {}) {
+async function orbitScene() {
   const THREE = await import(new URL('../../node_modules/three/build/three.module.js', import.meta.url).href);
   let seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
   function tex(base, n, size = 1024) {
@@ -49,6 +49,13 @@ window.makeOrbit = async function makeOrbit({ build = true } = {}) {
     [new THREE.CylinderGeometry(0.25, 0.25, 1.4, 24), '#a35', [1.7, 0.7, 0.6]],
   ];
   for (const [geo, base, at] of props) { const m = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ map: tex(base, 60, 256) })); m.position.set(...at); scene.add(m); }
+  return { THREE, renderer, scene };
+}
+
+window.orbitScene = orbitScene;
+
+window.makeOrbit = async function makeOrbit({ build = true } = {}) {
+  const { THREE, renderer, scene } = await orbitScene();
   const cam = new THREE.PerspectiveCamera(55, 960 / 720, 0.01, 50);
   const files = [];
   for (const [r, h] of [[0.62, 0.22], [0.55, 0.48]]) for (let i = 0; i < 22; i++) {
@@ -250,4 +257,64 @@ window.trainVariant = async ({ maxIters = 7000, initTarget, trainer = {} } = {})
     seedSeconds: +((seeded - t0) / 1000).toFixed(1), trainSeconds: +((trained - seeded) / 1000).toFixed(1), splats: raw.n,
     shapeMeanMm: window.shapeError(mesh).meanMm, psnrMean: +(psnr.reduce((a, b) => a + b, 0) / psnr.length).toFixed(2),
   };
+};
+
+// A live camera for testing capture guidance: a hand walking the low ring
+// around the object with tremor, played as getUserMedia. The simulated person
+// follows the guide: walks where the arrow points, stops on "hold".
+//   await liveOrbit({ seconds: 60 })   → photos kept and a guide log
+window.liveOrbit = async function liveOrbit({ seconds = 60, speed = 0.35, tremor = 0.0015, follow = true } = {}) {
+  const { THREE, renderer, scene } = await orbitScene();
+  const cam = new THREE.PerspectiveCamera(55, 960 / 720, 0.01, 50);
+  let angle = 0, direction = 1, running = true;
+  const draw = () => {
+    if (!running) return;
+    // tremor: small random hand movement, in meters
+    const j = () => (Math.random() - 0.5) * 2 * tremor;
+    cam.position.set(0.62 * Math.sin(angle) + j(), 0.22 + j(), 0.62 * Math.cos(angle) + j());
+    cam.lookAt(j() * 5, 0.17 + j() * 5, j() * 5);
+    renderer.render(scene, cam);
+    copy.drawImage(renderer.domElement, 0, 0);
+    requestAnimationFrame(draw);
+  };
+  // stream a 2D copy: a WebGL canvas outside the document barely streams at all
+  const canvas = document.createElement('canvas');
+  canvas.width = 960; canvas.height = 720;
+  const copy = canvas.getContext('2d');
+  const stream = canvas.captureStream(30);
+  draw();
+  navigator.mediaDevices.getUserMedia = async () => stream;
+  document.querySelector('#scan-clear-button').click();
+  document.querySelector('#scan-camera-button').click();
+  // the browser pane plays canvas streams at a few fps, far below a phone
+  // camera's 30: walk one 30 fps step per frame the page actually shows, so
+  // each frame moves as far as it would on a phone (slow motion, same path)
+  const video = document.querySelector('#scan-video');
+  let shown = 0;
+  const onFrame = () => { shown++; if (running) video.requestVideoFrameCallback(onFrame); };
+  video.requestVideoFrameCallback(onFrame);
+  const log = [];
+  const start = performance.now();
+  let stepped = 0, lastLine = '';
+  while (performance.now() - start < seconds * 1000) {
+    await new Promise((r) => setTimeout(r, 20));
+    const now = performance.now();
+    const steps = shown - stepped; stepped = shown;
+    const dt = steps / 30;
+    const guide = document.querySelector('#scan-guide');
+    const kind = guide.hidden ? 'countdown' : guide.className.replace('scan-guide ', '');
+    const arrow = document.querySelector('#scan-arrow');
+    const pointing = arrow && !arrow.hidden ? arrow.dataset.direction : '';
+    // the arrow's right is the camera moving right, which raises the angle
+    const toward = pointing === 'right' ? 1 : pointing === 'left' ? -1 : 0;
+    if (!follow) angle += direction * speed * dt;
+    else if (kind === 'move') angle += (toward || direction) * speed * dt;
+    else if (kind === 'lost') angle += (toward || -direction) * speed * dt;
+    const line = `${document.querySelector('#scan-photo-count').textContent} ${kind} ${document.querySelector('#scan-guide-text').textContent} ${pointing}`;
+    if (line !== lastLine) log.push(`${((now - start) / 1000).toFixed(1)}s ${(angle * 180 / Math.PI).toFixed(1)}° ${line}`);
+    lastLine = line;
+  }
+  running = false;
+  document.querySelector('#scan-stop-button').click();
+  return { photos: +document.querySelector('#scan-photo-count').textContent, degrees: Math.round(angle * 180 / Math.PI), fps: shown / seconds, log };
 };
