@@ -3,6 +3,7 @@ import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
 import { adviseCapture, matchFrames, pointTo, shrink, type Arrow, type Heading } from "./scan-capture";
 import { addPhotoToCoverage, coverageFraction, createCoverage, missingSides, nearestGap, PoseTracker, ringPoint, segmentFill, segmentPath, SEGMENTS, SCANNED_FILL, type Orientation } from "./scan-coverage";
 import { cropToSubject } from "./scan-crop";
+import { pointSplats } from "./scan-points";
 import { subjectCylinder, type ScanCamera, type Vec3 } from "./scan-mesh";
 import { buildUsdz } from "./scan-usdz";
 import type { MeshJob, MeshWorkerMessage, ViewMeta } from "./scan-worker";
@@ -77,6 +78,18 @@ function orbitCameras(cams: { R: number[]; t: number[] }[]): ScanCamera[] {
 }
 
 const isPhone = () => matchMedia("(any-pointer: coarse)").matches && Math.min(screen.width, screen.height) <= 820;
+
+async function hasWebGpu() {
+  // the browser harness (tests/browser/scan-orbit.js) forces the fallback through this
+  if (import.meta.env.DEV && (window as { spatialDropNoGpu?: boolean }).spatialDropNoGpu) return false;
+  const gpu = (navigator as Navigator & { gpu?: { requestAdapter(): Promise<unknown> } }).gpu;
+  if (!gpu) return false;
+  try {
+    return !!(await gpu.requestAdapter());
+  } catch {
+    return false;
+  }
+}
 
 function formatBytes(bytes: number) {
   return bytes < 1024 * 1024 ? `${Math.ceil(bytes / 1024)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
@@ -193,7 +206,7 @@ export function setupScanLab() {
   let usdzUrl = "";
   let startedAt = 0;
   // where this device spends its time, shown with the model so phone runs can be compared
-  const phases = { solved: 0, trainStart: 0, trained: 0, modelStart: 0 };
+  const phases = { solved: 0, trainStart: 0, trained: 0, modelStart: 0, noGpu: false };
   const seconds = (ms: number) => `${(ms / 1000).toFixed(1)} s`;
   let clockTimer = 0;
   let lookTimer = 0;
@@ -473,9 +486,6 @@ export function setupScanLab() {
 
   async function build() {
     setError();
-    if (!("gpu" in navigator)) {
-      return setError("On-device scanning needs WebGPU: Safari 26 or newer on iPhone, or a recent Chrome or Edge.");
-    }
     stopCamera();
     session?.dispose();
     session = null;
@@ -491,6 +501,10 @@ export function setupScanLab() {
 
     const { createSession, focalPxFrom35, solveTierOpts } = await loadSplat();
     const phone = isPhone();
+    // without WebGPU (Safari before 26, Lockdown Mode) the cameras still solve
+    // on the CPU and the model is carved from the solve's points instead of a
+    // trained splat: rougher shape, same photo texture
+    const gpu = await hasWebGpu();
     // The splat only has to get the shape right (color comes from the photos), and
     // that settles early. Measured on the synthetic orbit, three runs each:
     // 2000 steps from 20k splats: 8.5-9.1 s, 2.7-3.1 mm, 25.1-25.2 dB held out;
@@ -502,6 +516,7 @@ export function setupScanLab() {
       evalHoldEvery: 1e9,
       initTarget: 20000,
       ...(phone ? { lowMem: true } : {}),
+      ...(gpu ? {} : { noGpu: true }),
       sfm: { ...solveTierOpts("quick"), uiYield: true, ...(phone ? { workers: 3 } : {}) },
       trainer: { maxSplats: phone ? 300000 : 600000, capMult: 8 },
       // the browser harness (tests/browser/scan-orbit.js) tries other settings through this
@@ -556,7 +571,7 @@ export function setupScanLab() {
       if (placed < Math.max(6, 0.4 * photos.length)) {
         throw new Error(`Only ${placed} of ${photos.length} photos could be placed. Rescan with more overlap: move slowly around the object.`);
       }
-      setProgress(STAGE_LABELS.seed, 48, `${placed} cameras solved. Starting the splat trainer…`);
+      setProgress(STAGE_LABELS.seed, 48, gpu ? `${placed} cameras solved. Starting the splat trainer…` : `${placed} cameras solved.`);
       // texturing and carving project into the full photos: keep their intrinsics
       fullIntrinsics = new Map(created.recon.cams.map((camera: { imgIdx: number; cx?: number; cy?: number }) => {
         const frame = created.frames[camera.imgIdx];
@@ -565,6 +580,13 @@ export function setupScanLab() {
       // train on the object, not the room: crop every photo to the subject's region
       mark("solved");
       phases.solved = performance.now();
+      phases.noGpu = !gpu;
+      if (!gpu) {
+        phases.trainStart = phases.trained = performance.now();
+        setState("meshing");
+        await finishModel(created, pointSplats(created.recon.points));
+        return;
+      }
       const region = subjectCylinder(
         created.recon.points.map((point: { X: number[] }) => point.X as Vec3),
         orbitCameras(created.recon.cams),
@@ -612,7 +634,20 @@ export function setupScanLab() {
     setProgress("Saving the splat", 97, "Reading the trained splat back from the GPU…");
     try {
       const raw = await current.exportRawState();
-      splat = { data: Float32Array.from(raw.data.subarray(0, raw.n * 16)), n: raw.n, dc: current.trainer.dcMode };
+      current.pause();
+      await finishModel(current, { data: Float32Array.from(raw.data.subarray(0, raw.n * 16)), n: raw.n, dc: current.trainer.dcMode });
+    } catch (reason) {
+      setState("idle");
+      setError(reason instanceof Error ? reason.message : "The trained splat could not be read.");
+    } finally {
+      stopClock();
+    }
+  }
+
+  /** Mesh and texture from a splat cloud: the trained one, or the solve's points without WebGPU. */
+  async function finishModel(current: SplatSession, cloud: NonNullable<typeof splat>) {
+    try {
+      splat = cloud;
       cameras = orbitCameras(current.recon.cams);
       const recon = current.recon;
       viewMetas = recon.cams.map((camera: { imgIdx: number; R: number[]; t: number[]; f: number; fy?: number; cx?: number; cy?: number }) => {
@@ -624,12 +659,8 @@ export function setupScanLab() {
           k1: recon.k1 ?? 0, k2: recon.k2 ?? 0, ...full,
         };
       });
-      current.pause();
       if (import.meta.env.DEV) Object.assign(window, { spatialDropScan: { splat, cameras, viewMetas, session: current } });
       await makeMesh();
-    } catch (reason) {
-      setState("idle");
-      setError(reason instanceof Error ? reason.message : "The trained splat could not be read.");
     } finally {
       stopClock();
     }
@@ -683,12 +714,14 @@ export function setupScanLab() {
       meshStats.textContent = `${mesh.stats.triangles.toLocaleString()} triangles · ${w} × ${h} × ${d} cm · GLB ${formatBytes(glbBlob.size)} · USDZ ${formatBytes(usdzBlob.size)}${mesh.stats.groundRemoved ? " · ground removed" : ""}`;
       const modelTime = performance.now() - phases.modelStart;
       timingsLine.textContent = phases.trained
-        ? `Solved in ${seconds(phases.solved - startedAt)} · trained in ${seconds(phases.trained - phases.trainStart)} · model in ${seconds(modelTime)} · ${seconds(performance.now() - startedAt)} total on this device`
+        ? `Solved in ${seconds(phases.solved - startedAt)} · ${phases.noGpu ? "no WebGPU, so not trained" : `trained in ${seconds(phases.trained - phases.trainStart)}`} · model in ${seconds(modelTime)} · ${seconds(performance.now() - startedAt)} total on this device`
         : `Model rebuilt in ${seconds(modelTime)}`;
       // later rebuilds report only themselves
       phases.trained = 0;
       meshPanel.hidden = false;
-      setProgress("Model ready", 100, "Your scan is a local GLB now. Place it in AR, open it in Studio, or download it.");
+      setProgress("Model ready", 100, phases.noGpu
+        ? "Built without WebGPU, so the shape is rougher than usual. Safari 26 or a recent Chrome builds the full-quality model."
+        : "Your scan is a local GLB now. Place it in AR, open it in Studio, or download it.");
       window.dispatchEvent(new CustomEvent("spatialdrop:scanready", { detail: glbUrl }));
       setState("ready");
     } catch (reason) {

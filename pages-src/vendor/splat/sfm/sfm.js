@@ -554,7 +554,7 @@ async function runSfMOnce(images, log, sampleColor, opts = {}) {
   // cost of a SIFT run: ~350s of 484s on train-84; the GPU does the whole
   // graph in ~1s of compute)
   let gpuAll = null;
-  if (useSift && typeof navigator !== 'undefined' && navigator.gpu) {
+  if (useSift && !opts.noGpu && typeof navigator !== 'undefined' && navigator.gpu) {
     try {
       gpuAll = await gpuMatchAll(feats, pairs, 0.8, log, opts.gpu && opts.gpu.device,
         (d, t) => ev({ stage: 'matching', done: d, total: t, detail: { usable: 0, pair: null, gpu: true } }));

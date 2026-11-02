@@ -277,7 +277,8 @@ export class Session {
     }
     // the GPU matcher shares the session device (created here rather than at
     // seed) — it carries the raised buffer limits big feature sets need
-    if (!this.gpu) {
+    // Spatial Drop: without WebGPU the solve still runs; sfm.js matches on the CPU
+    if (!this.gpu && !this.opts.noGpu) {
       this.gpu = await createGpu({ device: this.opts.device });
       this.gpu.onLost = (info) => this._deviceLost(info);
     }
@@ -286,7 +287,8 @@ export class Session {
       (m) => this._log(m),
       (imgIdx, x, y) => this.frames[imgIdx].sampleColor(x, y),
       {
-        gpu: this.gpu,
+        gpu: this.gpu || undefined,
+        ...(this.opts.noGpu ? { noGpu: true } : {}),
         ...opts,
         onEvent: (e) => { this._stage(e); if (opts.onEvent) opts.onEvent(e); },
         debug: (d) => { this._debug = d; if (opts.debug) opts.debug(d); },
