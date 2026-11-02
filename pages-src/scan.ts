@@ -1,6 +1,6 @@
 import { BufferAttribute, BufferGeometry, CanvasTexture, LinearFilter, Mesh, MeshStandardMaterial, SRGBColorSpace } from "three";
 import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
-import { adviseCapture, matchFrames, shrink } from "./scan-capture";
+import { adviseCapture, matchFrames, pointTo, shrink, type Arrow, type Heading } from "./scan-capture";
 import { cropToSubject } from "./scan-crop";
 import { subjectCylinder, type ScanCamera, type Vec3 } from "./scan-mesh";
 import { buildUsdz } from "./scan-usdz";
@@ -18,6 +18,8 @@ const MIN_PHOTOS = 12;
 const COUNTDOWN_SECONDS = 3;
 // how long the view must stay still before a photo is kept
 const HOLD_MS = 450;
+// after this long without a photo, keep the next steady frame even if the match looks lost
+const STUCK_MS = 4000;
 // 35 mm-equivalent focal of a typical phone main camera (iPhone and Pixel wide lenses: 24–26 mm)
 const PHONE_MAIN_LENS_MM = 26;
 const STAGE_LABELS: Record<string, string> = {
@@ -114,6 +116,7 @@ export function setupScanLab() {
   const guide = $("#scan-guide");
   const guideRing = $("#scan-guide-ring");
   const guideText = $("#scan-guide-text");
+  const arrow = $("#scan-arrow");
   const fileInput = $<HTMLInputElement>("#scan-file-input");
   const dropZone = $("#scan-drop-zone");
   const thumbs = $("#scan-thumbs");
@@ -225,6 +228,7 @@ export function setupScanLab() {
     viewport.classList.remove("camera-active");
     countdown.hidden = true;
     guide.hidden = true;
+    arrow.hidden = true;
     ghost.hidden = true;
     if (ghost.src) URL.revokeObjectURL(ghost.src);
     ghost.removeAttribute("src");
@@ -263,17 +267,20 @@ export function setupScanLab() {
     let lastKeptAt = 0;
     let previousFrame: Float32Array | null = null;
     let holdingSince = 0;
+    let heading: Heading = 0;
     const recentSharpness: number[] = [];
     let saving = false;
     const countdownEnds = performance.now() + COUNTDOWN_SECONDS * 1000;
     countdown.textContent = `${COUNTDOWN_SECONDS}`;
     countdown.hidden = false;
     guide.hidden = true;
-    const showGuide = (kind: string, text: string, fill = 0) => {
+    const showGuide = (kind: string, text: string, fill = 0, direction: Arrow = null) => {
       guide.hidden = false;
       guide.className = `scan-guide ${kind}`;
       guideText.textContent = text;
       guideRing.style.setProperty("--fill", `${fill}`);
+      arrow.hidden = !direction;
+      arrow.dataset.direction = direction ?? "";
     };
     captureTimer = window.setInterval(() => {
       if (saving || !video.videoWidth || photos.length >= MAX_PHOTOS) return;
@@ -282,7 +289,10 @@ export function setupScanLab() {
         countdown.textContent = `${Math.ceil((countdownEnds - now) / 1000)}`;
         return;
       }
-      countdown.hidden = true;
+      if (!countdown.hidden) {
+        countdown.hidden = true;
+        lastKeptAt = now;
+      }
       probeContext.drawImage(video, 0, 0, probe.width, probe.height);
       const rgba = probeContext.getImageData(0, 0, probe.width, probe.height).data;
       const gray = new Float32Array(probe.width * probe.height);
@@ -291,36 +301,39 @@ export function setupScanLab() {
       recentSharpness.push(focus);
       if (recentSharpness.length > 30) recentSharpness.shift();
       const typical = [...recentSharpness].sort((a, b) => a - b)[recentSharpness.length >> 1];
-      const small = shrink(gray, probe.width, probe.height, 4);
+      const small = shrink(gray, probe.width, probe.height, 2);
       const match = lastKept ? matchFrames(lastKept, small.gray, small.width, small.height) : null;
       const advice = adviseCapture(match);
-      // still means this frame barely differs from the one 120 ms ago
-      let shake = Infinity;
-      if (previousFrame) {
-        shake = 0;
-        for (let i = 0; i < small.gray.length; i++) shake += Math.abs(small.gray[i] - previousFrame[i]);
-        shake /= small.gray.length;
-      }
+      // still: this frame sits within a couple of pixels of the one 120 ms ago
+      const jitter = previousFrame ? matchFrames(previousFrame, small.gray, small.width, small.height, { reach: 0.08 }) : null;
       previousFrame = small.gray;
+      const steady = !!jitter && jitter.overlap >= 0.6 && Math.hypot(jitter.dx * small.width, jitter.dy * small.height) <= 2 && focus >= 0.7 * typical;
+      const direction = pointTo(advice, match, heading, small.width);
       const matched = match ? `${Math.round(match.overlap * 100)}% matched` : "";
       ghost.hidden = advice !== "lost";
-      if (advice === "lost") {
-        holdingSince = 0;
-        return showGuide("lost", "Lost the last photo · go back until it lines up");
-      }
+      // someone stuck on "lost" still gets photos: the solve matches wider
+      // gaps than this guide does, and one more photo beats a stalled scan
+      const stuck = advice === "lost" && now - lastKeptAt > STUCK_MS;
       if (advice === "move") {
         holdingSince = 0;
-        return showGuide("move", `Keep circling · ${matched}`);
+        const wrongWay = heading && match && match.dx * small.width * heading <= -2;
+        return showGuide("move", wrongWay ? "Other way · you've been here" : heading ? `Keep circling · ${matched}` : "Circle the object either way", 0, direction);
       }
-      const steady = shake < 6 && focus >= 0.7 * typical;
+      if (advice === "lost" && !stuck) {
+        holdingSince = 0;
+        return showGuide("lost", "Too far · go back until it lines up", 0, direction);
+      }
+      const holdText = advice === "first" ? "Hold still for the first photo" : stuck ? "Hold still · keeping one to stay on track" : `Hold still · ${matched}`;
       if (!steady) {
         holdingSince = 0;
-        return showGuide("hold", advice === "first" ? "Hold still for the first photo" : `Hold still · ${matched}`);
+        return showGuide("hold", holdText);
       }
       holdingSince ||= now;
       const fill = Math.min(1, (now - holdingSince) / HOLD_MS);
-      showGuide("hold", advice === "first" ? "Hold still for the first photo" : `Hold still · ${matched}`, fill);
+      showGuide("hold", holdText, fill);
       if (fill < 1 || now - lastKeptAt < 350) return;
+      // the way the view travelled to this photo is the way the orbit goes
+      if (match && Math.abs(match.dx * small.width) >= 2) heading = match.dx > 0 ? 1 : -1;
       lastKept = small.gray;
       lastKeptAt = now;
       holdingSince = 0;
