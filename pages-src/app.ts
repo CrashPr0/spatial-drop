@@ -2,6 +2,7 @@ import "@google/model-viewer";
 import QRCode from "qrcode";
 import { setupBeamLab, stopBeamScanner } from "./beam";
 import { setupEighthWall } from "./eighth-wall";
+import { setupScanLab } from "./scan";
 import "./style.css";
 
 const MAX_BYTES = 15 * 1024 * 1024;
@@ -162,7 +163,7 @@ if (initialModel) {
   shareButton.disabled = false;
 }
 
-const modes = ["studio", "beam", "receive"] as const;
+const modes = ["studio", "scan", "beam", "receive"] as const;
 type Mode = typeof modes[number];
 
 function setMode(mode: Mode) {
@@ -186,6 +187,16 @@ document.querySelectorAll<HTMLButtonElement>("[data-mode]").forEach((button) => 
 });
 window.addEventListener("hashchange", () => setMode(modeFromHash()));
 
+window.addEventListener("spatialdrop:openinstudio", (event) => {
+  const { url, name } = (event as CustomEvent<{ url: string; name: string }>).detail;
+  setError();
+  setModel(url);
+  document.querySelector("#drop-title")!.textContent = name;
+  document.querySelector("#drop-detail")!.textContent = "Scanned on this device · Local preview";
+  if (!modelTitle.value) modelTitle.value = name;
+});
+
 setupBeamLab();
+setupScanLab();
 setupEighthWall(stopBeamScanner);
 setMode(modeFromHash());

@@ -1,0 +1,511 @@
+import { BufferAttribute, BufferGeometry, CanvasTexture, LinearFilter, Mesh, MeshStandardMaterial, SRGBColorSpace } from "three";
+import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
+import { bakeColorAtlas, buildScanMesh, type ScanCamera, type Vec3 } from "./scan-mesh";
+
+// the reconstruction library (~1 MB) loads only when someone actually scans
+const loadSplat = () => import("./vendor/splat/index.js");
+type SplatSession = ReturnType<Awaited<ReturnType<typeof loadSplat>>["createSession"]>;
+const isVideoFile = (file: File) => /^video\//.test(file.type) || /\.(mp4|mov|m4v|webm|mkv)$/i.test(file.name);
+type ScanState = "idle" | "capturing" | "building" | "training" | "meshing" | "ready";
+
+const MAX_PHOTOS = 72;
+const MIN_PHOTOS = 12;
+// 35 mm-equivalent focal of a typical phone main camera (iPhone and Pixel wide lenses: 24–26 mm)
+const PHONE_MAIN_LENS_MM = 26;
+const STAGE_LABELS: Record<string, string> = {
+  decode: "Reading photos",
+  features: "Finding features",
+  matching: "Matching views",
+  focal: "Estimating the lens",
+  pass: "Solving camera poses",
+  register: "Placing cameras",
+  ba: "Refining cameras",
+  solved: "Cameras solved",
+  seed: "Seeding the splat",
+  train: "Training on this device",
+};
+const STAGE_SPANS: Record<string, [number, number]> = {
+  decode: [0, 6], features: [6, 18], matching: [18, 30], focal: [30, 34], pass: [30, 34],
+  register: [34, 42], ba: [42, 46], solved: [46, 48], seed: [48, 50], train: [50, 96],
+};
+
+const isPhone = () => matchMedia("(any-pointer: coarse)").matches && Math.min(screen.width, screen.height) <= 820;
+
+function formatBytes(bytes: number) {
+  return bytes < 1024 * 1024 ? `${Math.ceil(bytes / 1024)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function download(blob: Blob, name: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+
+/** Cheap focus score: variance of the Laplacian on a small grayscale copy. */
+function sharpness(gray: Float32Array, width: number, height: number) {
+  let sum = 0, sumSq = 0, count = 0;
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const i = y * width + x;
+      const lap = 4 * gray[i] - gray[i - 1] - gray[i + 1] - gray[i - width] - gray[i + width];
+      sum += lap; sumSq += lap * lap; count++;
+    }
+  }
+  const mean = sum / count;
+  return sumSq / count - mean * mean;
+}
+
+export function setupScanLab() {
+  const $ = <T extends HTMLElement>(selector: string) => document.querySelector<T>(selector)!;
+  const video = $<HTMLVideoElement>("#scan-video");
+  const viewport = $(".scan-viewport");
+  const idle = $("#scan-idle");
+  const cameraButton = $<HTMLButtonElement>("#scan-camera-button");
+  const stopButton = $<HTMLButtonElement>("#scan-stop-button");
+  const fileInput = $<HTMLInputElement>("#scan-file-input");
+  const dropZone = $("#scan-drop-zone");
+  const thumbs = $("#scan-thumbs");
+  const photoCount = $("#scan-photo-count");
+  const captureHint = $("#scan-capture-hint");
+  const clearButton = $<HTMLButtonElement>("#scan-clear-button");
+  const buildButton = $<HTMLButtonElement>("#scan-build-button");
+  const error = $("#scan-error");
+  const stageTitle = $("#scan-stage-title");
+  const percentage = $("#scan-percentage");
+  const progressBar = $("#scan-progress-bar");
+  const detail = $("#scan-detail");
+  const metricCameras = $("#scan-metric-cameras");
+  const metricSplats = $("#scan-metric-splats");
+  const metricTime = $("#scan-metric-time");
+  const liveCanvas = $<HTMLCanvasElement>("#scan-live-canvas");
+  const finishButton = $<HTMLButtonElement>("#scan-finish-button");
+  const meshPanel = $("#scan-mesh-panel");
+  const heightInput = $<HTMLInputElement>("#scan-height");
+  const cropInput = $<HTMLInputElement>("#scan-crop");
+  const densityInput = $<HTMLInputElement>("#scan-density");
+  const detailInput = $<HTMLSelectElement>("#scan-detail-level");
+  const rebuildButton = $<HTMLButtonElement>("#scan-rebuild-button");
+  const viewer = $<HTMLElement & { src: string }>("#scan-viewer");
+  const meshStats = $("#scan-mesh-stats");
+  const studioButton = $<HTMLButtonElement>("#scan-studio-button");
+  const glbButton = $<HTMLButtonElement>("#scan-glb-button");
+  const plyButton = $<HTMLButtonElement>("#scan-ply-button");
+  const arButton = $<HTMLButtonElement>("#scan-ar-button");
+
+  let state: ScanState = "idle";
+  let photos: File[] = [];
+  let stream: MediaStream | null = null;
+  let captureTimer = 0;
+  let session: SplatSession | null = null;
+  let splat: { data: Float32Array; n: number; dc: "sigmoid" | "sh" } | null = null;
+  let cameras: ScanCamera[] = [];
+  let glbBlob: Blob | null = null;
+  let glbUrl = "";
+  let startedAt = 0;
+  let clockTimer = 0;
+  let lookTimer = 0;
+
+  function setError(message = "") {
+    error.textContent = message;
+    error.hidden = !message;
+  }
+
+  function setProgress(title: string, value: number, text?: string) {
+    stageTitle.textContent = title;
+    const clamped = Math.max(0, Math.min(100, Math.round(value)));
+    percentage.textContent = `${clamped}%`;
+    progressBar.style.width = `${clamped}%`;
+    if (text !== undefined) detail.textContent = text;
+  }
+
+  function setState(next: ScanState) {
+    state = next;
+    const busy = next === "building" || next === "training" || next === "meshing";
+    buildButton.disabled = busy || photos.length < MIN_PHOTOS;
+    cameraButton.disabled = busy;
+    clearButton.disabled = busy || !photos.length;
+    dropZone.classList.toggle("disabled", busy);
+    finishButton.hidden = next !== "training";
+    rebuildButton.disabled = next !== "ready";
+  }
+
+  function renderPhotos() {
+    photoCount.textContent = `${photos.length}`;
+    const needed = Math.max(0, MIN_PHOTOS - photos.length);
+    captureHint.textContent = photos.length >= MAX_PHOTOS
+      ? "Photo limit reached. Build when ready."
+      : needed
+        ? `${needed} more to start · 30–60 recommended`
+        : photos.length < 30 ? "Enough to try · more angles help" : "Great coverage";
+    thumbs.replaceChildren(...photos.slice(-12).map((photo) => {
+      const image = document.createElement("img");
+      image.alt = "";
+      image.src = URL.createObjectURL(photo);
+      image.addEventListener("load", () => URL.revokeObjectURL(image.src), { once: true });
+      return image;
+    }));
+    setState(state);
+  }
+
+  function addPhoto(file: File) {
+    if (photos.length >= MAX_PHOTOS) return;
+    photos.push(file);
+    renderPhotos();
+  }
+
+  // ── capture ────────────────────────────────────────────────────────────
+  function stopCamera() {
+    window.clearInterval(captureTimer);
+    captureTimer = 0;
+    stream?.getTracks().forEach((track) => track.stop());
+    stream = null;
+    video.srcObject = null;
+    viewport.classList.remove("camera-active");
+    idle.hidden = false;
+    cameraButton.hidden = false;
+    stopButton.hidden = true;
+    if (state === "capturing") setState("idle");
+  }
+
+  async function startCamera() {
+    setError();
+    if (!navigator.mediaDevices?.getUserMedia) return setError("This browser cannot open the camera. Choose photos or a video instead.");
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+        audio: false,
+      });
+    } catch {
+      return setError("Camera access was blocked. Allow the camera, or choose photos or a video instead.");
+    }
+    video.srcObject = stream;
+    await video.play().catch(() => undefined);
+    viewport.classList.add("camera-active");
+    idle.hidden = true;
+    cameraButton.hidden = true;
+    stopButton.hidden = false;
+    setState("capturing");
+
+    // keep a frame when the view has moved enough and is not blurrier than usual
+    const probe = document.createElement("canvas");
+    probe.width = 160;
+    probe.height = 120;
+    const probeContext = probe.getContext("2d", { willReadFrequently: true })!;
+    let lastKept: Float32Array | null = null;
+    let lastKeptAt = 0;
+    const recentSharpness: number[] = [];
+    let saving = false;
+    captureTimer = window.setInterval(() => {
+      if (saving || !video.videoWidth || photos.length >= MAX_PHOTOS) return;
+      probeContext.drawImage(video, 0, 0, probe.width, probe.height);
+      const rgba = probeContext.getImageData(0, 0, probe.width, probe.height).data;
+      const gray = new Float32Array(probe.width * probe.height);
+      for (let i = 0; i < gray.length; i++) gray[i] = 0.299 * rgba[i * 4] + 0.587 * rgba[i * 4 + 1] + 0.114 * rgba[i * 4 + 2];
+      const focus = sharpness(gray, probe.width, probe.height);
+      recentSharpness.push(focus);
+      if (recentSharpness.length > 30) recentSharpness.shift();
+      const typical = [...recentSharpness].sort((a, b) => a - b)[recentSharpness.length >> 1];
+      let motion = Infinity;
+      if (lastKept) {
+        motion = 0;
+        for (let i = 0; i < gray.length; i++) motion += Math.abs(gray[i] - lastKept[i]);
+        motion /= gray.length;
+      }
+      const now = performance.now();
+      if (now - lastKeptAt < 350 || motion < 9 || focus < 0.7 * typical) return;
+      lastKept = gray;
+      lastKeptAt = now;
+      saving = true;
+      const frame = document.createElement("canvas");
+      frame.width = video.videoWidth;
+      frame.height = video.videoHeight;
+      frame.getContext("2d")!.drawImage(video, 0, 0);
+      frame.toBlob((blob) => {
+        saving = false;
+        if (!blob) return;
+        viewport.classList.remove("flash");
+        void viewport.offsetWidth;
+        viewport.classList.add("flash");
+        addPhoto(new File([blob], `capture_${String(photos.length).padStart(3, "0")}.jpg`, { type: "image/jpeg" }));
+        if (photos.length >= MAX_PHOTOS) stopCamera();
+      }, "image/jpeg", 0.92);
+    }, 120);
+  }
+
+  async function acceptFiles(files: File[]) {
+    setError();
+    if (!files.length || state === "building" || state === "training" || state === "meshing") return;
+    const clip = files.find((file) => isVideoFile(file));
+    if (clip) {
+      setState("building");
+      try {
+        setProgress("Picking sharp frames", 0, `Reading ${clip.name} (${formatBytes(clip.size)}) on this device…`);
+        const { extractSharpFrames } = await loadSplat();
+        const result = await extractSharpFrames(clip, {
+          maxFrames: MAX_PHOTOS,
+          onProgress: (event: { stage: string; done: number; total: number }) => {
+            const share = event.stage === "scan" ? 0.6 : 0.4;
+            const base = event.stage === "scan" ? 0 : 60;
+            setProgress("Picking sharp frames", base + share * 100 * (event.done / Math.max(1, event.total)));
+          },
+        });
+        photos = result.frames.slice(0, MAX_PHOTOS).map((frame: { source: Blob; name: string }) =>
+          new File([frame.source], `${frame.name}.jpg`, { type: frame.source.type || "image/jpeg" }));
+        setProgress("Frames ready", 100, `${photos.length} sharp frames from a ${result.duration.toFixed(1)} s clip.`);
+      } catch (reason) {
+        setError(reason instanceof Error ? `That video could not be read: ${reason.message}` : "That video could not be read.");
+      }
+      setState("idle");
+      renderPhotos();
+      return;
+    }
+    files.filter((file) => file.type.startsWith("image/") || /\.(jpe?g|png|heic|webp)$/i.test(file.name)).forEach(addPhoto);
+  }
+
+  // ── reconstruction ─────────────────────────────────────────────────────
+  function stopClock() {
+    window.clearInterval(clockTimer);
+    window.clearInterval(lookTimer);
+  }
+
+  async function build() {
+    setError();
+    if (!("gpu" in navigator)) {
+      return setError("On-device scanning needs WebGPU: Safari 26 or newer on iPhone, or a recent Chrome or Edge.");
+    }
+    stopCamera();
+    session?.dispose();
+    session = null;
+    splat = null;
+    meshPanel.hidden = true;
+    liveCanvas.hidden = true;
+    setState("building");
+    startedAt = performance.now();
+    clockTimer = window.setInterval(() => {
+      const seconds = Math.round((performance.now() - startedAt) / 1000);
+      metricTime.textContent = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+    }, 1000);
+
+    const { createSession, focalPxFrom35, solveTierOpts } = await loadSplat();
+    const phone = isPhone();
+    const maxIters = phone ? 3500 : 7000;
+    const created = createSession({
+      maxIters,
+      holdout: -1,
+      evalHoldEvery: 1e9,
+      ...(phone ? { initTarget: 60000, lowMem: true } : {}),
+      sfm: { ...solveTierOpts("quick"), uiYield: true, ...(phone ? { workers: 3 } : {}) },
+      trainer: { maxSplats: phone ? 300000 : 600000, capMult: 8 },
+    });
+    session = created;
+    created.on("stage", (event: { stage: string; done: number; total: number }) => {
+      const span = STAGE_SPANS[event.stage];
+      if (!span || event.stage === "train") return;
+      const fraction = event.total ? event.done / event.total : 0;
+      setProgress(STAGE_LABELS[event.stage] || "Working", span[0] + (span[1] - span[0]) * fraction,
+        event.stage === "register" ? `${event.done} of ${event.total} photos placed in 3D.` : undefined);
+      if (event.stage === "register") metricCameras.textContent = `${event.done} / ${event.total}`;
+    });
+    created.on("metrics", (metrics: { iter: number; splats: number; itersPerSec: number }) => {
+      const fraction = metrics.iter / maxIters;
+      // early steps run on few splats and are fast: only estimate once growth has settled
+      const remaining = metrics.itersPerSec > 0 && fraction > 0.15 ? Math.max(0, (maxIters - metrics.iter) / metrics.itersPerSec) : 0;
+      setProgress(STAGE_LABELS.train, 50 + 46 * fraction,
+        `${metrics.iter.toLocaleString()} of ${maxIters.toLocaleString()} steps${remaining ? ` · ${remaining < 60 ? "under a minute" : `about ${Math.ceil(remaining / 60)} min`} left` : ""}. You can finish early.`);
+      metricSplats.textContent = metrics.splats.toLocaleString();
+    });
+    created.on("event", (event: { kind: string }) => {
+      if (event.kind === "train-complete") void afterTraining();
+      if (event.kind === "device-lost") {
+        stopClock();
+        setState("idle");
+        setError("The GPU was reclaimed (the tab went to the background). Keep this tab open while it trains, then build again.");
+      }
+    });
+
+    try {
+      setProgress(STAGE_LABELS.decode, 0, `Processing ${photos.length} photos. Nothing leaves this device.`);
+      await created.load(photos);
+      // live captures carry no EXIF lens data; without a starting focal the
+      // solver's search can lock onto a wrong lens and scatter the cameras
+      const frames = created.frames as { fw: number; fh: number; exif?: { f35?: number } | null }[];
+      const tagged = frames.filter((frame) => (frame.exif?.f35 ?? 0) > 0).length;
+      await created.solve(tagged >= 0.6 * frames.length ? {} : {
+        focalPrior: focalPxFrom35(PHONE_MAIN_LENS_MM, frames[0].fw, frames[0].fh),
+      });
+      const placed = created.recon.cams.length;
+      metricCameras.textContent = `${placed} / ${photos.length}`;
+      if (placed < Math.max(6, 0.4 * photos.length)) {
+        throw new Error(`Only ${placed} of ${photos.length} photos could be placed. Rescan with more overlap: move slowly around the object.`);
+      }
+      setProgress(STAGE_LABELS.seed, 48, `${placed} cameras solved. Starting the splat trainer…`);
+      await created.seed();
+      if (session !== created) return;
+      const first = created.trainer.camMeta[0];
+      liveCanvas.width = first.w;
+      liveCanvas.height = first.h;
+      liveCanvas.hidden = false;
+      created.view.attach(liveCanvas);
+      let look = 0;
+      created.view.lookThrough(0);
+      lookTimer = window.setInterval(() => {
+        look = (look + 1) % created.trainer.camMeta.length;
+        created.view.lookThrough(look);
+      }, 2500);
+      setState("training");
+      created.start();
+    } catch (reason) {
+      stopClock();
+      created.dispose();
+      if (session === created) session = null;
+      setState("idle");
+      setProgress("Scan stopped", 0, "");
+      setError(reason instanceof Error ? reason.message : "The scan could not be reconstructed.");
+    }
+  }
+
+  async function afterTraining() {
+    const current = session;
+    if (!current || state !== "training") return;
+    window.clearInterval(lookTimer);
+    setState("meshing");
+    setProgress("Saving the splat", 97, "Reading the trained splat back from the GPU…");
+    try {
+      const raw = await current.exportRawState();
+      splat = { data: Float32Array.from(raw.data.subarray(0, raw.n * 16)), n: raw.n, dc: current.trainer.dcMode };
+      const { camPosition } = await loadSplat();
+      cameras = current.recon.cams.map((camera: { R: number[]; t: number[] }) => {
+        const R = camera.R;
+        return {
+          position: camPosition(camera) as Vec3,
+          forward: [R[6], R[7], R[8]] as Vec3,
+          up: [-R[3], -R[4], -R[5]] as Vec3,
+        };
+      });
+      current.pause();
+      if (import.meta.env.DEV) Object.assign(window, { spatialDropScan: { splat, cameras, session: current } });
+      await makeMesh();
+    } catch (reason) {
+      setState("idle");
+      setError(reason instanceof Error ? reason.message : "The trained splat could not be read.");
+    } finally {
+      stopClock();
+    }
+  }
+
+  async function makeMesh() {
+    if (!splat) return;
+    setState("meshing");
+    setProgress("Building the AR mesh", 98, "Carving a solid surface out of the splat…");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    try {
+      const heightCm = Math.min(500, Math.max(1, Number(heightInput.value) || 30));
+      const mesh = buildScanMesh(splat, cameras, {
+        heightMeters: heightCm / 100,
+        crop: Number(cropInput.value),
+        density: Number(densityInput.value),
+        resolution: Number(detailInput.value) || 80,
+      });
+      const atlas = bakeColorAtlas(mesh);
+      glbBlob = await exportGlb(atlas);
+      if (glbUrl) URL.revokeObjectURL(glbUrl);
+      glbUrl = URL.createObjectURL(glbBlob);
+      viewer.setAttribute("src", glbUrl);
+      const [w, h, d] = mesh.stats.sizeMeters.map((value) => Math.round(value * 100));
+      meshStats.textContent = `${mesh.stats.triangles.toLocaleString()} triangles · ${w} × ${h} × ${d} cm · ${formatBytes(glbBlob.size)}${mesh.stats.groundRemoved ? " · ground removed" : ""}`;
+      meshPanel.hidden = false;
+      setProgress("Model ready", 100, "Your scan is a local GLB now. Place it in AR, open it in Studio, or download it.");
+      window.dispatchEvent(new CustomEvent("spatialdrop:scanready", { detail: glbUrl }));
+      setState("ready");
+    } catch (reason) {
+      setState("ready");
+      meshPanel.hidden = false;
+      setError(reason instanceof Error ? reason.message : "The mesh could not be built.");
+    }
+  }
+
+  async function exportGlb(atlas: ReturnType<typeof bakeColorAtlas>) {
+    const canvas = document.createElement("canvas");
+    canvas.width = atlas.size;
+    canvas.height = atlas.size;
+    canvas.getContext("2d")!.putImageData(new ImageData(atlas.pixels, atlas.size, atlas.size), 0, 0);
+    const texture = new CanvasTexture(canvas);
+    texture.flipY = false;
+    texture.colorSpace = SRGBColorSpace;
+    texture.generateMipmaps = false;
+    texture.minFilter = LinearFilter;
+    texture.magFilter = LinearFilter;
+    // PNG keeps each triangle's 2x2 texel cell exact; JPEG blocks would smear neighbors
+    texture.userData.mimeType = "image/png";
+
+    const geometry = new BufferGeometry();
+    geometry.setAttribute("position", new BufferAttribute(atlas.positions, 3));
+    geometry.setAttribute("normal", new BufferAttribute(atlas.normals, 3));
+    geometry.setAttribute("uv", new BufferAttribute(atlas.uvs, 2));
+    const material = new MeshStandardMaterial({ map: texture, roughness: 0.85, metalness: 0 });
+    const mesh = new Mesh(geometry, material);
+    mesh.name = "Spatial Drop scan";
+    const result = await new GLTFExporter().parseAsync(mesh, { binary: true });
+    if (!(result instanceof ArrayBuffer)) throw new Error("The GLB export failed.");
+    return new Blob([result], { type: "model/gltf-binary" });
+  }
+
+  // ── wiring ─────────────────────────────────────────────────────────────
+  cameraButton.addEventListener("click", () => void startCamera());
+  stopButton.addEventListener("click", stopCamera);
+  dropZone.addEventListener("click", () => fileInput.click());
+  dropZone.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") fileInput.click();
+  });
+  dropZone.addEventListener("dragover", (event) => { event.preventDefault(); dropZone.classList.add("dragging"); });
+  dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragging"));
+  dropZone.addEventListener("drop", (event) => {
+    event.preventDefault();
+    dropZone.classList.remove("dragging");
+    void acceptFiles(Array.from(event.dataTransfer?.files || []));
+  });
+  fileInput.addEventListener("change", () => {
+    void acceptFiles(Array.from(fileInput.files || []));
+    fileInput.value = "";
+  });
+  clearButton.addEventListener("click", () => {
+    photos = [];
+    renderPhotos();
+  });
+  buildButton.addEventListener("click", () => void build());
+  finishButton.addEventListener("click", () => {
+    finishButton.disabled = true;
+    void session?.finish().finally(() => { finishButton.disabled = false; });
+  });
+  rebuildButton.addEventListener("click", () => void makeMesh());
+  glbButton.addEventListener("click", () => glbBlob && download(glbBlob, "spatial-drop-scan.glb"));
+  plyButton.addEventListener("click", async () => {
+    if (!session?.trainer) return;
+    download(await session.exportPlyBlob(), "spatial-drop-scan.ply");
+  });
+  studioButton.addEventListener("click", () => {
+    if (!glbUrl) return;
+    window.dispatchEvent(new CustomEvent("spatialdrop:openinstudio", { detail: { url: glbUrl, name: "Spatial Drop scan" } }));
+    window.location.hash = "studio";
+  });
+  if (import.meta.env.DEV) {
+    Object.assign(window, {
+      spatialDropLoadSplat(saved: { data: Float32Array; n: number; dc: "sigmoid" | "sh"; cameras: ScanCamera[] }) {
+        splat = { data: saved.data, n: saved.n, dc: saved.dc };
+        cameras = saved.cameras;
+        return makeMesh();
+      },
+    });
+  }
+
+  // eighth-wall.ts enables it once a mesh exists
+  arButton.disabled = true;
+  window.addEventListener("spatialdrop:modechange", (event) => {
+    if ((event as CustomEvent<string>).detail !== "scan") stopCamera();
+  });
+  window.addEventListener("pagehide", stopCamera);
+  renderPhotos();
+}

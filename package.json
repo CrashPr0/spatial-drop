@@ -12,6 +12,7 @@
     "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
     "test": "npm run build && node --test tests/rendered-html.test.mjs",
     "test:beam": "node --import tsx --test tests/beam-codec.test.ts",
+    "test:scan": "node --import tsx --test tests/scan-mesh.test.ts",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern pages-dist",
     "db:generate": "drizzle-kit generate"
   },

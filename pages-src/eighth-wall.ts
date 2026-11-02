@@ -70,17 +70,23 @@ function setError(element: HTMLElement, message = "") {
 
 export function setupEighthWall(stopScanner: () => void) {
   const runtimeWindow = window as SpatialWindow;
-  const launchButton = document.querySelector<HTMLButtonElement>("#beam-ar-button")!;
-  const error = document.querySelector<HTMLElement>("#beam-ar-error")!;
+  // each launcher carries its own model and error line: received beams and local scans
+  const launchers = [
+    { button: document.querySelector<HTMLButtonElement>("#beam-ar-button")!, error: document.querySelector<HTMLElement>("#beam-ar-error")!, event: "spatialdrop:modelreceived", url: "" },
+    { button: document.querySelector<HTMLButtonElement>("#scan-ar-button")!, error: document.querySelector<HTMLElement>("#scan-ar-error")!, event: "spatialdrop:scanready", url: "" },
+  ];
   const overlay = document.querySelector<HTMLElement>("#beam-ar-overlay")!;
   const root = document.querySelector<HTMLElement>("#beam-ar-root")!;
   const status = document.querySelector<HTMLElement>("#beam-ar-status")!;
   const exitButton = document.querySelector<HTMLButtonElement>("#beam-ar-exit")!;
   let modelUrl = "";
 
-  window.addEventListener("spatialdrop:modelreceived", (event) => {
-    modelUrl = (event as CustomEvent<string>).detail;
-    launchButton.disabled = !modelUrl;
+  launchers.forEach((launcher) => {
+    window.addEventListener(launcher.event, (event) => {
+      launcher.url = (event as CustomEvent<string>).detail;
+      launcher.button.disabled = !launcher.url;
+    });
+    launcher.button.addEventListener("click", () => void startAR(launcher));
   });
 
   function exitAR() {
@@ -148,8 +154,9 @@ export function setupEighthWall(stopScanner: () => void) {
     root.appendChild(scene);
   }
 
-  async function startAR() {
-    if (!modelUrl) return;
+  async function startAR({ url, error }: { url: string; error: HTMLElement }) {
+    if (!url) return;
+    modelUrl = url;
     stopScanner();
     setError(error);
     status.innerHTML = "<i></i>Loading 8th Wall world tracking…";
@@ -174,7 +181,6 @@ export function setupEighthWall(stopScanner: () => void) {
     }
   }
 
-  launchButton.addEventListener("click", () => void startAR());
   exitButton.addEventListener("click", exitAR);
   window.addEventListener("pagehide", exitAR);
 }

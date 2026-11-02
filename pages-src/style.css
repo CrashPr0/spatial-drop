@@ -354,6 +354,44 @@ footer a { color: inherit; text-underline-offset: 3px; }
 .beam-ar-hud button { border: 1px solid rgba(255, 255, 255, .45); background: transparent; color: white; padding: 9px 11px; font: inherit; cursor: pointer; }
 @keyframes beamPulse { 50% { opacity: .35; } }
 
+/* On-device scan lab */
+#scan-mode > section { margin-inline: clamp(18px, 5vw, 84px); }
+.scan-workbench { display: grid; grid-template-columns: minmax(0, 1fr) minmax(340px, 1fr); background: white; border-top: 7px solid var(--sjsu-blue); box-shadow: 0 22px 70px rgba(19, 55, 97, .12); }
+.scan-count { color: white; font: 800 9px/1 monospace; letter-spacing: .1em; }
+.scan-count b { color: var(--sjsu-gold); font-size: 15px; }
+.scan-viewport { aspect-ratio: 4 / 3; }
+.scan-viewport.flash::after { content: ""; position: absolute; z-index: 4; inset: 0; border: 6px solid var(--sjsu-gold); animation: scanFlash .35s ease-out forwards; pointer-events: none; }
+@keyframes scanFlash { to { opacity: 0; } }
+.scan-tip { margin: 16px 0 0; color: #c9d9e7; font-size: 12px; line-height: 1.5; }
+.scan-tip b { color: white; }
+.scan-hint { margin: 10px 0 0; color: var(--sjsu-gold); font: 800 9px/1.4 monospace; letter-spacing: .08em; text-transform: uppercase; }
+.scan-drop-zone { margin: 20px 0 14px; min-height: 84px; background: rgba(255, 255, 255, .06); border-color: rgba(255, 255, 255, .35); color: white; }
+.scan-drop-zone:hover, .scan-drop-zone.dragging { background: rgba(255, 255, 255, .12); border-color: var(--sjsu-gold); }
+.scan-drop-zone small { color: #c9d9e7; }
+.scan-drop-zone.disabled { pointer-events: none; opacity: .5; }
+.scan-thumbs { display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; }
+.scan-thumbs img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; border: 1px solid rgba(255, 255, 255, .2); }
+.scan-clear { align-self: flex-start; margin-top: 12px; color: #c9d9e7; }
+.scan-clear:disabled { opacity: .4; cursor: default; }
+.scan-detail { min-height: 48px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.scan-live-canvas { display: block; width: 100%; height: auto; background: #0e2e53; }
+.scan-live-canvas[hidden] { display: none; }
+.scan-finish { width: 100%; margin-top: 12px; color: var(--spartan-navy); }
+.scan-finish[hidden] { display: none; }
+.scan-mesh-panel { margin-top: 34px; padding-top: 26px; border-top: 1px solid var(--line); }
+.scan-mesh-panel[hidden] { display: none; }
+.scan-model-stage { height: 360px; position: relative; margin-top: 0; }
+.scan-model-stage .ar-button { bottom: 18px; }
+.scan-mesh-stats { margin: 0 0 18px; color: var(--muted); font: 700 10px/1.5 monospace; letter-spacing: .04em; }
+.scan-mesh-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 0 18px; align-items: end; }
+.scan-mesh-controls select { width: 100%; border: 1px solid var(--line); border-radius: 0; padding: 12px; background: white; color: var(--ink); font: inherit; font-size: 14px; }
+.scan-mesh-controls .field { margin-bottom: 12px; }
+.scan-mesh-controls input[type="range"] { padding: 0; border: 0; accent-color: var(--sjsu-blue); height: 44px; }
+.scan-actions { margin-top: 22px; }
+.scan-actions button { border-color: var(--sjsu-blue); }
+.scan-actions button:first-child { background: var(--sjsu-gold); border-color: var(--sjsu-gold); }
+.scan-actions button:disabled { opacity: .45; cursor: not-allowed; }
+
 @media (max-width: 900px) {
   .intro { grid-template-columns: 1fr; gap: 26px; }
   .intro::after { right: -10vw; top: 24%; }
@@ -367,6 +405,7 @@ footer a { color: inherit; text-underline-offset: 3px; }
   .beam-display-card { grid-template-columns: 1fr; }
   .beam-screen { justify-self: start; }
   .receive-workbench { grid-template-columns: 1fr; }
+  .scan-workbench { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 580px) {
@@ -394,6 +433,10 @@ footer a { color: inherit; text-underline-offset: 3px; }
   .beam-screen { padding: 10px 10px 42px; box-shadow: 8px 8px 0 var(--spartan-navy); }
   .beam-screen-hud { left: 10px; right: 10px; }
   .receive-workbench { margin-inline: -16px; }
+  #scan-mode > section { margin-inline: 16px; }
+  #scan-mode > .scan-workbench { margin-inline: 0; }
+  .scan-mesh-controls { grid-template-columns: 1fr; gap: 0; }
+  .scan-thumbs { grid-template-columns: repeat(4, 1fr); }
   .scanner-card { padding: 16px; }
   .scanner-viewport { min-height: 0; }
   .scanner-controls { align-items: stretch; flex-direction: column; gap: 0; }
