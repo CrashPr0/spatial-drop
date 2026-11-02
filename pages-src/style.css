@@ -363,7 +363,12 @@ footer a { color: inherit; text-underline-offset: 3px; }
 .scan-viewport.flash::after { content: ""; position: absolute; z-index: 4; inset: 0; border: 6px solid var(--sjsu-gold); animation: scanFlash .35s ease-out forwards; pointer-events: none; }
 @keyframes scanFlash { to { opacity: 0; } }
 .scan-ghost { position: absolute; z-index: 1; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: .45; pointer-events: none; }
-.scan-ghost[hidden], .scan-countdown[hidden], .scan-guide[hidden], .scan-arrow[hidden] { display: none; }
+.scan-ghost[hidden], .scan-countdown[hidden], .scan-guide[hidden], .scan-arrow[hidden], .scan-ring[hidden] { display: none; }
+.scan-ring { position: absolute; z-index: 5; top: 10px; right: 10px; width: clamp(76px, 22%, 112px); aspect-ratio: 1; pointer-events: none; filter: drop-shadow(0 2px 6px rgba(0, 0, 0, .5)); }
+.scan-ring-segment { stroke: rgba(255, 255, 255, .35); stroke-width: .6; fill: color-mix(in srgb, var(--sjsu-gold) calc(var(--fill, 0) * 100%), rgba(9, 31, 56, .7)); }
+.scan-ring-segment.done { stroke: var(--sjsu-gold); stroke-width: 1; }
+.scan-ring-marker { fill: white; stroke: var(--spartan-navy); stroke-width: 1.4; }
+.scan-ring-percent { fill: white; font: 800 11px monospace; }
 /* two chevrons, one per side; the direction shows one, "either" shows both */
 .scan-arrow { position: absolute; z-index: 4; inset: 0; pointer-events: none; }
 .scan-arrow i { position: absolute; top: 50%; width: clamp(28px, 9vw, 48px); aspect-ratio: 1; margin-top: calc(clamp(28px, 9vw, 48px) / -2); border: solid var(--sjsu-gold); border-width: 0 8px 8px 0; filter: drop-shadow(0 2px 6px rgba(0, 0, 0, .6)); }

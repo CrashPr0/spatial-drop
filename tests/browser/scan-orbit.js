@@ -263,7 +263,9 @@ window.trainVariant = async ({ maxIters = 7000, initTarget, trainer = {} } = {})
 // around the object with tremor, played as getUserMedia. The simulated person
 // follows the guide: walks where the arrow points, stops on "hold".
 //   await liveOrbit({ seconds: 60 })   → photos kept and a guide log
-window.liveOrbit = async function liveOrbit({ seconds = 60, speed = 0.35, tremor = 0.0015, follow = true } = {}) {
+// sensor: also play the phone's compass (deviceorientation), so the coverage ring
+// runs on real poses; false leaves it estimating from the image shift alone.
+window.liveOrbit = async function liveOrbit({ seconds = 60, speed = 0.35, tremor = 0.0015, follow = true, sensor = true } = {}) {
   const { THREE, renderer, scene } = await orbitScene();
   const cam = new THREE.PerspectiveCamera(55, 960 / 720, 0.01, 50);
   let angle = 0, direction = 1, running = true;
@@ -273,6 +275,8 @@ window.liveOrbit = async function liveOrbit({ seconds = 60, speed = 0.35, tremor
     const j = () => (Math.random() - 0.5) * 2 * tremor;
     cam.position.set(0.62 * Math.sin(angle) + j(), 0.22 + j(), 0.62 * Math.cos(angle) + j());
     cam.lookAt(j() * 5, 0.17 + j() * 5, j() * 5);
+    // the camera at (sin a, cos a) faces heading -a: alpha is the compass turned counterclockwise
+    if (sensor) window.dispatchEvent(Object.assign(new Event('deviceorientation'), { alpha: ((angle * 180 / Math.PI) % 360 + 360) % 360, beta: 90, gamma: 0 }));
     renderer.render(scene, cam);
     copy.drawImage(renderer.domElement, 0, 0);
     requestAnimationFrame(draw);
@@ -316,5 +320,8 @@ window.liveOrbit = async function liveOrbit({ seconds = 60, speed = 0.35, tremor
   }
   running = false;
   document.querySelector('#scan-stop-button').click();
-  return { photos: +document.querySelector('#scan-photo-count').textContent, degrees: Math.round(angle * 180 / Math.PI), fps: shown / seconds, log };
+  // the ring's own report of how much of the circle the photos cover
+  const ringPercent = document.querySelector('#scan-ring .scan-ring-percent')?.textContent;
+  const segmentsDone = document.querySelectorAll('#scan-ring .scan-ring-segment.done').length;
+  return { photos: +document.querySelector('#scan-photo-count').textContent, ringPercent, segmentsDone, degrees: Math.round(angle * 180 / Math.PI), fps: shown / seconds, log };
 };

@@ -1,6 +1,7 @@
 import { BufferAttribute, BufferGeometry, CanvasTexture, LinearFilter, Mesh, MeshStandardMaterial, SRGBColorSpace } from "three";
 import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
 import { adviseCapture, matchFrames, pointTo, shrink, type Arrow, type Heading } from "./scan-capture";
+import { addPhotoToCoverage, coverageFraction, createCoverage, missingSides, nearestGap, PoseTracker, ringPoint, segmentFill, segmentPath, SEGMENTS, SCANNED_FILL, type Orientation } from "./scan-coverage";
 import { cropToSubject } from "./scan-crop";
 import { subjectCylinder, type ScanCamera, type Vec3 } from "./scan-mesh";
 import { buildUsdz } from "./scan-usdz";
@@ -104,6 +105,25 @@ function sharpness(gray: Float32Array, width: number, height: number) {
   return sumSq / count - mean * mean;
 }
 
+/** Start reading the device's orientation; resolves to a stop function (a no-op where there is no sensor). */
+async function listenForOrientation(onReading: (reading: Orientation) => void) {
+  const asking = (window.DeviceOrientationEvent as unknown as { requestPermission?: () => Promise<string> } | undefined)?.requestPermission;
+  if (asking) {
+    try {
+      if (await asking.call(window.DeviceOrientationEvent) !== "granted") return () => {};
+    } catch {
+      return () => {};
+    }
+  }
+  const handler = (event: DeviceOrientationEvent) => {
+    // desktops fire one event with every angle null
+    if (event.alpha === null || event.beta === null || event.gamma === null) return;
+    onReading({ alpha: event.alpha, beta: event.beta, gamma: event.gamma });
+  };
+  window.addEventListener("deviceorientation", handler);
+  return () => window.removeEventListener("deviceorientation", handler);
+}
+
 export function setupScanLab() {
   const $ = <T extends HTMLElement>(selector: string) => document.querySelector<T>(selector)!;
   const video = $<HTMLVideoElement>("#scan-video");
@@ -117,6 +137,11 @@ export function setupScanLab() {
   const guideRing = $("#scan-guide-ring");
   const guideText = $("#scan-guide-text");
   const arrow = $("#scan-arrow");
+  const ring = $<HTMLElement>("#scan-ring");
+  const ringSegments = Array.from({ length: SEGMENTS }, (_, i) => ring.querySelector<SVGPathElement>(`[data-segment="${i}"]`)!);
+  ringSegments.forEach((segment, i) => segment.setAttribute("d", segmentPath(i)));
+  const ringMarker = ring.querySelector<SVGCircleElement>(".scan-ring-marker")!;
+  const ringPercent = ring.querySelector<SVGTextElement>(".scan-ring-percent")!;
   const fileInput = $<HTMLInputElement>("#scan-file-input");
   const dropZone = $("#scan-drop-zone");
   const thumbs = $("#scan-thumbs");
@@ -153,6 +178,9 @@ export function setupScanLab() {
   let photos: File[] = [];
   let stream: MediaStream | null = null;
   let captureTimer = 0;
+  let stopSensing = () => {};
+  // how the live ring reads, appended to the photo hint while capturing
+  let coverageNote = "";
   let session: SplatSession | null = null;
   let splat: { data: Float32Array; n: number; dc: "sigmoid" | "sh" } | null = null;
   let cameras: ScanCamera[] = [];
@@ -197,11 +225,12 @@ export function setupScanLab() {
   function renderPhotos() {
     photoCount.textContent = `${photos.length}`;
     const needed = Math.max(0, MIN_PHOTOS - photos.length);
-    captureHint.textContent = photos.length >= MAX_PHOTOS
+    const base = photos.length >= MAX_PHOTOS
       ? "Photo limit reached. Build when ready."
       : needed
         ? `${needed} more to start · 30–60 recommended`
         : photos.length < 30 ? "Enough to try · more angles help" : "Great coverage";
+    captureHint.textContent = coverageNote ? `${base} · ${coverageNote}` : base;
     thumbs.replaceChildren(...photos.slice(-12).map((photo) => {
       const image = document.createElement("img");
       image.alt = "";
@@ -229,6 +258,11 @@ export function setupScanLab() {
     countdown.hidden = true;
     guide.hidden = true;
     arrow.hidden = true;
+    ring.hidden = true;
+    stopSensing();
+    stopSensing = () => {};
+    coverageNote = "";
+    renderPhotos();
     ghost.hidden = true;
     if (ghost.src) URL.revokeObjectURL(ghost.src);
     ghost.removeAttribute("src");
@@ -241,12 +275,18 @@ export function setupScanLab() {
   async function startCamera() {
     setError();
     if (!navigator.mediaDevices?.getUserMedia) return setError("This browser cannot open the camera. Choose photos or a video instead.");
+    // the compass and gyro give each photo's real direction around the object;
+    // iOS asks for them on a tap, so this comes before the camera prompt
+    const pose = new PoseTracker();
+    const coverage = createCoverage();
+    stopSensing = await listenForOrientation((reading) => pose.sense(reading));
     try {
       stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
         audio: false,
       });
     } catch {
+      stopSensing();
       return setError("Camera access was blocked. Allow the camera, or choose photos or a video instead.");
     }
     video.srcObject = stream;
@@ -282,6 +322,27 @@ export function setupScanLab() {
       arrow.hidden = !direction;
       arrow.dataset.direction = direction ?? "";
     };
+    let ringDirection: "cw" | "ccw" | undefined;
+    const paintRing = () => {
+      ring.hidden = false;
+      segmentFill(coverage).forEach((fill, i) => {
+        ringSegments[i].style.setProperty("--fill", `${Math.min(1, fill)}`);
+        ringSegments[i].classList.toggle("done", fill >= SCANNED_FILL);
+      });
+      // where the camera is now; without a sensor, where the last photo was
+      const at = pose.angle() ?? coverage.last;
+      ringMarker.setAttribute("visibility", at === null ? "hidden" : "visible");
+      if (at !== null) {
+        const point = ringPoint(at, 37);
+        ringMarker.setAttribute("cx", point.x.toFixed(2));
+        ringMarker.setAttribute("cy", point.y.toFixed(2));
+      }
+      const percent = Math.round(coverageFraction(coverage) * 100);
+      ringPercent.textContent = `${percent}%`;
+      const open = missingSides(coverage);
+      coverageNote = coverage.last === null ? "" : open.length ? `${percent}% around · still open: ${open.join(", ")}` : "Full circle · try a higher loop";
+    };
+    paintRing();
     captureTimer = window.setInterval(() => {
       if (saving || !video.videoWidth || photos.length >= MAX_PHOTOS) return;
       const now = performance.now();
@@ -308,7 +369,16 @@ export function setupScanLab() {
       const jitter = previousFrame ? matchFrames(previousFrame, small.gray, small.width, small.height, { reach: 0.08 }) : null;
       previousFrame = small.gray;
       const steady = !!jitter && jitter.overlap >= 0.6 && Math.hypot(jitter.dx * small.width, jitter.dy * small.height) <= 2 && focus >= 0.7 * typical;
-      const direction = pointTo(advice, match, heading, small.width);
+      let direction = pointTo(advice, match, heading, small.width);
+      // with a real heading from the sensors, point at the nearest open side
+      // of the ring instead of just carrying on the way the image shifted
+      const here = pose.angle();
+      if (advice === "move" && here !== null) {
+        const gap = nearestGap(coverage, here, ringDirection);
+        // walking to the left raises the ring angle
+        if (gap) direction = gap.direction === "cw" ? "left" : "right";
+      }
+      paintRing();
       const matched = match ? `${Math.round(match.overlap * 100)}% matched` : "";
       ghost.hidden = advice !== "lost";
       // someone stuck on "lost" still gets photos: the solve matches wider
@@ -334,6 +404,15 @@ export function setupScanLab() {
       if (fill < 1 || now - lastKeptAt < 350) return;
       // the way the view travelled to this photo is the way the orbit goes
       if (match && Math.abs(match.dx * small.width) >= 2) heading = match.dx > 0 ? 1 : -1;
+      const before = coverage.last;
+      if (before === null) pose.anchor();
+      const at = pose.angleForKeep(before, match?.dx ?? 0, match?.overlap ?? 1);
+      addPhotoToCoverage(coverage, at, match?.overlap ?? 1);
+      if (before !== null) {
+        const step = ((at - before + 540) % 360) - 180;
+        if (Math.abs(step) >= 3) ringDirection = step > 0 ? "cw" : "ccw";
+      }
+      paintRing();
       lastKept = small.gray;
       lastKeptAt = now;
       holdingSince = 0;
