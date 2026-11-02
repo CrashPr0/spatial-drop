@@ -1,5 +1,6 @@
 import { BufferAttribute, BufferGeometry, CanvasTexture, LinearFilter, Mesh, MeshStandardMaterial, SRGBColorSpace } from "three";
 import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
+import { adviseCapture, matchFrames, shrink } from "./scan-capture";
 import { cropToSubject } from "./scan-crop";
 import { subjectCylinder, type ScanCamera, type Vec3 } from "./scan-mesh";
 import { buildUsdz } from "./scan-usdz";
@@ -13,6 +14,10 @@ type ScanState = "idle" | "capturing" | "building" | "training" | "meshing" | "r
 
 const MAX_PHOTOS = 72;
 const MIN_PHOTOS = 12;
+// seconds to get into position after pressing start
+const COUNTDOWN_SECONDS = 3;
+// how long the view must stay still before a photo is kept
+const HOLD_MS = 450;
 // 35 mm-equivalent focal of a typical phone main camera (iPhone and Pixel wide lenses: 24–26 mm)
 const PHONE_MAIN_LENS_MM = 26;
 const STAGE_LABELS: Record<string, string> = {
@@ -104,6 +109,11 @@ export function setupScanLab() {
   const idle = $("#scan-idle");
   const cameraButton = $<HTMLButtonElement>("#scan-camera-button");
   const stopButton = $<HTMLButtonElement>("#scan-stop-button");
+  const ghost = $<HTMLImageElement>("#scan-ghost");
+  const countdown = $("#scan-countdown");
+  const guide = $("#scan-guide");
+  const guideRing = $("#scan-guide-ring");
+  const guideText = $("#scan-guide-text");
   const fileInput = $<HTMLInputElement>("#scan-file-input");
   const dropZone = $("#scan-drop-zone");
   const thumbs = $("#scan-thumbs");
@@ -213,6 +223,11 @@ export function setupScanLab() {
     stream = null;
     video.srcObject = null;
     viewport.classList.remove("camera-active");
+    countdown.hidden = true;
+    guide.hidden = true;
+    ghost.hidden = true;
+    if (ghost.src) URL.revokeObjectURL(ghost.src);
+    ghost.removeAttribute("src");
     idle.hidden = false;
     cameraButton.hidden = false;
     stopButton.hidden = true;
@@ -238,17 +253,36 @@ export function setupScanLab() {
     stopButton.hidden = false;
     setState("capturing");
 
-    // keep a frame when the view has moved enough and is not blurrier than usual
+    // match each frame against the last kept photo: keep one once the view
+    // has moved on but still shares enough with it for the solve to link them
     const probe = document.createElement("canvas");
     probe.width = 160;
     probe.height = 120;
     const probeContext = probe.getContext("2d", { willReadFrequently: true })!;
     let lastKept: Float32Array | null = null;
     let lastKeptAt = 0;
+    let previousFrame: Float32Array | null = null;
+    let holdingSince = 0;
     const recentSharpness: number[] = [];
     let saving = false;
+    const countdownEnds = performance.now() + COUNTDOWN_SECONDS * 1000;
+    countdown.textContent = `${COUNTDOWN_SECONDS}`;
+    countdown.hidden = false;
+    guide.hidden = true;
+    const showGuide = (kind: string, text: string, fill = 0) => {
+      guide.hidden = false;
+      guide.className = `scan-guide ${kind}`;
+      guideText.textContent = text;
+      guideRing.style.setProperty("--fill", `${fill}`);
+    };
     captureTimer = window.setInterval(() => {
       if (saving || !video.videoWidth || photos.length >= MAX_PHOTOS) return;
+      const now = performance.now();
+      if (now < countdownEnds) {
+        countdown.textContent = `${Math.ceil((countdownEnds - now) / 1000)}`;
+        return;
+      }
+      countdown.hidden = true;
       probeContext.drawImage(video, 0, 0, probe.width, probe.height);
       const rgba = probeContext.getImageData(0, 0, probe.width, probe.height).data;
       const gray = new Float32Array(probe.width * probe.height);
@@ -257,16 +291,39 @@ export function setupScanLab() {
       recentSharpness.push(focus);
       if (recentSharpness.length > 30) recentSharpness.shift();
       const typical = [...recentSharpness].sort((a, b) => a - b)[recentSharpness.length >> 1];
-      let motion = Infinity;
-      if (lastKept) {
-        motion = 0;
-        for (let i = 0; i < gray.length; i++) motion += Math.abs(gray[i] - lastKept[i]);
-        motion /= gray.length;
+      const small = shrink(gray, probe.width, probe.height, 4);
+      const match = lastKept ? matchFrames(lastKept, small.gray, small.width, small.height) : null;
+      const advice = adviseCapture(match);
+      // still means this frame barely differs from the one 120 ms ago
+      let shake = Infinity;
+      if (previousFrame) {
+        shake = 0;
+        for (let i = 0; i < small.gray.length; i++) shake += Math.abs(small.gray[i] - previousFrame[i]);
+        shake /= small.gray.length;
       }
-      const now = performance.now();
-      if (now - lastKeptAt < 350 || motion < 9 || focus < 0.7 * typical) return;
-      lastKept = gray;
+      previousFrame = small.gray;
+      const matched = match ? `${Math.round(match.overlap * 100)}% matched` : "";
+      ghost.hidden = advice !== "lost";
+      if (advice === "lost") {
+        holdingSince = 0;
+        return showGuide("lost", "Lost the last photo · go back until it lines up");
+      }
+      if (advice === "move") {
+        holdingSince = 0;
+        return showGuide("move", `Keep circling · ${matched}`);
+      }
+      const steady = shake < 6 && focus >= 0.7 * typical;
+      if (!steady) {
+        holdingSince = 0;
+        return showGuide("hold", advice === "first" ? "Hold still for the first photo" : `Hold still · ${matched}`);
+      }
+      holdingSince ||= now;
+      const fill = Math.min(1, (now - holdingSince) / HOLD_MS);
+      showGuide("hold", advice === "first" ? "Hold still for the first photo" : `Hold still · ${matched}`, fill);
+      if (fill < 1 || now - lastKeptAt < 350) return;
+      lastKept = small.gray;
       lastKeptAt = now;
+      holdingSince = 0;
       saving = true;
       const frame = document.createElement("canvas");
       frame.width = video.videoWidth;
@@ -274,10 +331,12 @@ export function setupScanLab() {
       frame.getContext("2d")!.drawImage(video, 0, 0);
       frame.toBlob((blob) => {
         saving = false;
-        if (!blob) return;
+        if (!blob || !stream) return;
         viewport.classList.remove("flash");
         void viewport.offsetWidth;
         viewport.classList.add("flash");
+        if (ghost.src) URL.revokeObjectURL(ghost.src);
+        ghost.src = URL.createObjectURL(blob);
         addPhoto(new File([blob], `capture_${String(photos.length).padStart(3, "0")}.jpg`, { type: "image/jpeg" }));
         if (photos.length >= MAX_PHOTOS) stopCamera();
       }, "image/jpeg", 0.92);
