@@ -73,8 +73,8 @@ window.scanStatus = () => ({
   stats: document.querySelector('#scan-mesh-stats').textContent,
   err: document.querySelector('#scan-error').hidden ? null : document.querySelector('#scan-error').textContent,
 });
-window.loadSaved = () => new Promise((res) => { const r = indexedDB.open('scan-dev', 1); r.onupgradeneeded = () => r.result.createObjectStore('k'); r.onsuccess = () => { const g = r.result.transaction('k').objectStore('k').get('last'); g.onsuccess = () => res(g.result); }; });
-window.saveScan = () => new Promise((res, rej) => { const s = window.spatialDropScan; const ses = s.session; const names = ses.recon.cams.map((k) => ses.frames[k.imgIdx].name); const r = indexedDB.open('scan-dev', 1); r.onupgradeneeded = () => r.result.createObjectStore('k'); r.onsuccess = () => { const tx = r.result.transaction('k', 'readwrite'); tx.objectStore('k').put({ data: s.splat.data, n: s.splat.n, dc: s.splat.dc, cameras: s.cameras, viewMetas: s.viewMetas, names }, 'last'); tx.oncomplete = () => res(true); tx.onerror = rej; }; });
+window.loadSaved = (key = 'last') => new Promise((res) => { const r = indexedDB.open('scan-dev', 1); r.onupgradeneeded = () => r.result.createObjectStore('k'); r.onsuccess = () => { const g = r.result.transaction('k').objectStore('k').get(key); g.onsuccess = () => res(g.result); }; });
+window.saveScan = (key = 'last') => new Promise((res, rej) => { const s = window.spatialDropScan; const ses = s.session; const names = ses.recon.cams.map((k) => ses.frames[k.imgIdx].name); const r = indexedDB.open('scan-dev', 1); r.onupgradeneeded = () => r.result.createObjectStore('k'); r.onsuccess = () => { const tx = r.result.transaction('k', 'readwrite'); tx.objectStore('k').put({ data: s.splat.data, n: s.splat.n, dc: s.splat.dc, cameras: s.cameras, viewMetas: s.viewMetas, names }, key); tx.oncomplete = () => res(true); tx.onerror = rej; }; });
 
 // Signed distance to the true scene (meters, +Y up, floor at 0), matching a mesh built with heightMeters: 0.41.
 const sdfBox = (p) => {
@@ -180,4 +180,45 @@ window.crossSectionPng = (meshes, heights = [0.06, 0.13, 0.22, 0.33]) => {
     });
   });
   return canvas.toDataURL('image/png');
+};
+
+/** Held-out photo PSNR of a scan: texture the mesh from every photo except the
+ *  test one, render it from the test camera, compare over the mesh's pixels. */
+window.heldOutPsnr = async (saved, files, testNames = ['orbit_03.jpg', 'orbit_14.jpg', 'orbit_27.jpg', 'orbit_38.jpg']) => {
+  const THREE = await import(new URL('../../node_modules/three/build/three.module.js', import.meta.url).href);
+  const M = await import('/scan-mesh.ts'); const T = await import('/scan-texture.ts');
+  const byName = new Map(files.map((f) => [f.name, f]));
+  const decode = async (file) => { const b = await createImageBitmap(file); const c = document.createElement('canvas'); c.width = b.width; c.height = b.height; const x = c.getContext('2d'); x.drawImage(b, 0, 0); return x.getImageData(0, 0, b.width, b.height); };
+  const mesh = M.buildScanMesh(saved, saved.cameras, { resolution: 104, heightMeters: 0.41, targetTriangles: 15000, views: window.cameraModels(saved.viewMetas) });
+  const scores = [];
+  for (const name of testNames) {
+    const meta = saved.viewMetas.find((m) => m.name === name);
+    if (!meta) continue;
+    const photo = await decode(byName.get(name)); const W = photo.width, H = photo.height;
+    const atlas = M.bakeTextureAtlas(mesh, { size: 1024 });
+    await T.projectPhotos(atlas, mesh, saved.viewMetas.filter((m) => m.name !== name).map((m) => ({ ...m, load: () => decode(byName.get(m.name)) })));
+    const pos = new Float32Array(atlas.positions.length);
+    for (let i = 0; i < pos.length; i += 3) pos.set(mesh.toWorld([atlas.positions[i], atlas.positions[i + 1], atlas.positions[i + 2]]), i);
+    const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(pos, 3)); g.setAttribute('uv', new THREE.BufferAttribute(atlas.uvs, 2));
+    const canvas = document.createElement('canvas'); canvas.width = canvas.height = atlas.size; canvas.getContext('2d').putImageData(new ImageData(atlas.pixels.slice(), atlas.size, atlas.size), 0, 0);
+    const tex = new THREE.CanvasTexture(canvas); tex.flipY = false; tex.colorSpace = THREE.SRGBColorSpace; tex.generateMipmaps = false; tex.minFilter = THREE.LinearFilter;
+    const scene = new THREE.Scene(); scene.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide })));
+    const s = W / meta.featureWidth, fx = meta.f * s, fy = (meta.fy ?? meta.f) * s, cx = (meta.cx ?? meta.featureWidth / 2) * s, cy = (meta.cy ?? meta.featureHeight / 2) * s;
+    const cam = new THREE.Camera(), near = 0.01, far = 100;
+    // OpenCV intrinsics and pose as a GL projection and view
+    cam.projectionMatrix.set(2 * fx / W, 0, 1 - 2 * cx / W, 0, 0, 2 * fy / H, 2 * cy / H - 1, 0, 0, 0, -(far + near) / (far - near), -2 * far * near / (far - near), 0, 0, -1, 0);
+    cam.projectionMatrixInverse.copy(cam.projectionMatrix).invert();
+    const R = meta.R, t = meta.t;
+    const view = new THREE.Matrix4().set(R[0], R[1], R[2], t[0], -R[3], -R[4], -R[5], -t[1], -R[6], -R[7], -R[8], -t[2], 0, 0, 0, 1);
+    cam.matrixWorldInverse.copy(view); cam.matrixWorld.copy(view).invert(); cam.matrixAutoUpdate = false;
+    const r = new THREE.WebGLRenderer({ preserveDrawingBuffer: true, alpha: true }); r.setSize(W, H, false); r.setClearColor(0x000000, 0); r.outputColorSpace = THREE.SRGBColorSpace;
+    r.render(scene, cam); const gl = r.getContext(); const px = new Uint8Array(W * H * 4); gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, px); r.dispose();
+    let se = 0, n = 0;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const o = ((H - 1 - y) * W + x) * 4; if (px[o + 3] < 255) continue;
+      const p = (y * W + x) * 4; for (let c = 0; c < 3; c++) { const d = px[o + c] - photo.data[p + c]; se += d * d; } n += 3;
+    }
+    scores.push(+(10 * Math.log10(255 * 255 / (se / n))).toFixed(2));
+  }
+  return scores;
 };

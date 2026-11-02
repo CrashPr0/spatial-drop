@@ -224,24 +224,13 @@ interface PreparedSplat {
 }
 
 /** Crop the splat to the scanned subject in an upright, ground-aligned frame. */
-export function prepareSubject(cloud: SplatCloud, cameras: ScanCamera[], options: MeshOptions = {}) {
-  const crop = options.crop ?? 0.45;
-  const { data, n } = cloud;
-
+/** The orbit's frame: what the cameras circle, which way is up, and how far out they stood.
+ *  basis rows are +X, +Y (up) and +Z (toward the first camera), so local = basis · (world − center). */
+function orbitFrame(cameras: ScanCamera[], fallbackCenter: () => Vec3) {
   let up = normalize(cameras.reduce<Vec3>((sum, camera) => [sum[0] + camera.up[0], sum[1] + camera.up[1], sum[2] + camera.up[2]], [0, 0, 0]));
   if (length(up) < 0.5) up = normalize(cameras[0]?.up ?? [0, -1, 0]);
-
-  let center = orbitCenter(cameras);
-  if (!center) {
-    // no orbit: the opacity-weighted median of the splats is the best guess
-    const xs: number[] = [], ys: number[] = [], zs: number[] = [];
-    for (let i = 0; i < n; i++) {
-      if (sigmoid(data[i * STRIDE + 13]) < 0.5) continue;
-      xs.push(data[i * STRIDE]); ys.push(data[i * STRIDE + 1]); zs.push(data[i * STRIDE + 2]);
-    }
-    center = [median(xs), median(ys), median(zs)];
-  }
-  const reach = median(cameras.map((camera) => length(sub(camera.position, center!)))) || 1;
+  const center = orbitCenter(cameras) ?? fallbackCenter();
+  const reach = median(cameras.map((camera) => length(sub(camera.position, center)))) || 1;
 
   // basis: +Y up, +Z toward the first camera so the first photo is the front view
   let toward = sub(cameras[0]?.position ?? [0, 0, -1], center);
@@ -253,9 +242,55 @@ export function prepareSubject(cloud: SplatCloud, cameras: ScanCamera[], options
   // an orbit keeps the subject inside the ring of cameras: crop a cylinder
   // around the vertical axis through the orbit center, sized by that ring
   const ring = median(cameras.map((camera) => {
-    const local = apply(basis, sub(camera.position, center!));
+    const local = apply(basis, sub(camera.position, center));
     return Math.hypot(local[0], local[2]);
   })) || reach;
+  return { center, basis, reach, ring };
+}
+
+/** A conservative vertical cylinder around the scanned object, from the solver's
+ *  sparse points, before any training: the region worth training at all. */
+export function subjectCylinder(points: Vec3[], cameras: ScanCamera[], options: { crop?: number; pad?: number } = {}) {
+  const { center, basis, reach, ring } = orbitFrame(cameras, () => [0, 1, 2].map((k) => median(points.map((p) => p[k]))) as Vec3);
+  const radius = (options.crop ?? 0.45) * ring;
+  const inside = points.map((p) => apply(basis, sub(p, center)))
+    .filter((p) => Math.hypot(p[0], p[2]) <= radius && Math.abs(p[1]) <= reach);
+  const generous = { center, rotation: basis, radius, bottom: -reach, top: reach };
+  if (inside.length < 40) return generous;
+  // the lowest band is the table under the object; what stands above it is the object
+  const heights = inside.map((p) => p[1]).sort((a, b) => a - b);
+  const floor = heights[Math.floor(0.02 * (heights.length - 1))];
+  const object = inside.filter((p) => p[1] > floor + 0.1 * radius);
+  if (object.length < 30) return generous;
+  const spread = object.map((p) => Math.hypot(p[0], p[2])).sort((a, b) => a - b);
+  const tops = object.map((p) => p[1]).sort((a, b) => a - b);
+  // a mask that clips the object loses it for good: pad well past the sparse points,
+  // which are thin on smooth faces and miss silhouette edges entirely
+  const objectRadius = spread[Math.floor(0.97 * (spread.length - 1))];
+  const tight = Math.min(radius, (options.pad ?? 1) * (1.15 * objectRadius + 0.05 * radius));
+  const objectTop = tops[Math.floor(0.99 * (tops.length - 1))];
+  const height = objectTop - floor;
+  return {
+    center,
+    rotation: basis,
+    radius: tight,
+    bottom: floor - 0.05 * radius,
+    top: Math.min(reach, objectTop + (options.pad ?? 1) * (0.15 * height + 0.05 * radius)),
+  };
+}
+
+export function prepareSubject(cloud: SplatCloud, cameras: ScanCamera[], options: MeshOptions = {}) {
+  const crop = options.crop ?? 0.45;
+  const { data, n } = cloud;
+  // no orbit: the opacity-weighted median of the splats is the best guess
+  const { center, basis, reach, ring } = orbitFrame(cameras, () => {
+    const xs: number[] = [], ys: number[] = [], zs: number[] = [];
+    for (let i = 0; i < n; i++) {
+      if (sigmoid(data[i * STRIDE + 13]) < 0.5) continue;
+      xs.push(data[i * STRIDE]); ys.push(data[i * STRIDE + 1]); zs.push(data[i * STRIDE + 2]);
+    }
+    return [median(xs), median(ys), median(zs)];
+  });
   const radius = crop * ring;
   const sh = cloud.dc === "sh";
   const splats: PreparedSplat[] = [];
