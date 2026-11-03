@@ -405,6 +405,12 @@ async function runSfMOnce(images, log, sampleColor, opts = {}) {
         // fine-scale defaults: firstOctave -1 (upsampled octave) flooded the
         // contrast-sorted cap with poorly-localized features and warped truck
         // to 8.5% ATE; firstOctave 0 + 1800 feats = 0.04% on truck AND train
+        const cached = images[id].precomputedSift;
+        if (cached && opts.siftFeats === 3900 && (opts.siftFirstOctave ?? 0) === 0 && (opts.siftPeak ?? 1) === 1) {
+          // Deliver through the same completion path without blocking the feed loop.
+          queueMicrotask(() => wk.onmessage({ data: { ...cached, id } }));
+          return;
+        }
         wk.postMessage({
           id, gray: images[id].gray, w: images[id].fw, h: images[id].fh,
           maxFeats: opts.siftFeats || 3900, firstOctave: opts.siftFirstOctave ?? 0,

@@ -13,3 +13,10 @@ Public License 2.0 (header in the file), used only to decode scan videos.
 
 Photo preparation also reuses the filtered training canvas for thumbnails and
 closes decoded image and mask bitmaps when processing fails (`io/frames.js`).
+
+The SIFT worker pool accepts dimension-checked live-capture descriptors at the
+default extraction settings, avoiding repeated extraction (`sfm/sfm.js`).
+
+Low-memory sessions release live-capture descriptors after solving. Trainer
+setup relies on WebGPU zero-initialization for Adam moment buffers, avoiding
+two redundant CPU arrays and GPU uploads (`session.js`, `gs/trainer.js`).

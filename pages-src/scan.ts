@@ -89,7 +89,8 @@ function orbitCameras(cams: { R: number[]; t: number[] }[]): ScanCamera[] {
   }));
 }
 
-const isPhone = () => matchMedia("(any-pointer: coarse)").matches && Math.min(screen.width, screen.height) <= 820;
+// Include large iPads, including those reporting a desktop-sized viewport.
+const isPhone = () => matchMedia("(any-pointer: coarse)").matches || navigator.maxTouchPoints > 1;
 
 async function hasWebGpu() {
   // the browser harness (tests/browser/scan-orbit.js) forces the fallback through this
@@ -210,6 +211,40 @@ export function setupScanLab() {
   // how each live photo was taken, saved with "Download photos" so a scan can be rebuilt and studied elsewhere
   const photoNotes = new WeakMap<File, { step: string; elevation: number | null; ringAngle: number; overlap: number | null; at: number }>();
   let stream: MediaStream | null = null;
+  // Cache descriptors by File identity; removed photos can be garbage collected.
+  const preparedFeatures = new WeakMap<File, { fw: number; fh: number; features: object }>();
+  let prepareWorker: Worker | null = null;
+  let prepareQueue: File[] = [];
+  let preparing: File | null = null;
+  const stopPreparing = () => {
+    prepareWorker?.terminate();
+    prepareWorker = null;
+    preparing = null;
+    prepareQueue = [];
+  };
+  const prepareNext = () => {
+    if (!prepareWorker || preparing || !prepareQueue.length) return;
+    preparing = prepareQueue.shift()!;
+    prepareWorker.postMessage({ id: 0, file: preparing });
+  };
+  const preparePhoto = (file: File) => {
+    try {
+      if (!prepareWorker) {
+        prepareWorker = new Worker(new URL("./scan-prepare-worker.js", import.meta.url), { type: "module" });
+        prepareWorker.onmessage = ({ data }) => {
+          if (preparing && data.features) preparedFeatures.set(preparing, data);
+          preparing = null;
+          prepareNext();
+        };
+        prepareWorker.onerror = stopPreparing;
+      }
+      // Let the build-time pool handle overflow rather than retaining a long
+      // capture-time backlog on slower phones.
+      if (prepareQueue.length >= 4) return;
+      prepareQueue.push(file);
+      prepareNext();
+    } catch { stopPreparing(); }
+  };
   let captureTimer = 0;
   let cameraGeneration = 0;
   let stopSensing = () => {};
@@ -556,6 +591,9 @@ export function setupScanLab() {
         const file = new File([blob], `capture_${String(photos.length).padStart(3, "0")}.jpg`, { type: "image/jpeg" });
         photoNotes.set(file, note);
         addPhoto(file);
+        // Above this size the normal loader may choose a different decode
+        // scale; do not reuse descriptors from a differently sampled image.
+        if (Math.max(sourceWidth, sourceHeight) <= 1920) preparePhoto(file);
         paintSteps();
         if (photos.length >= MAX_PHOTOS) return stopCamera();
         if (passDone(pass(), coverageFraction(coverage), passPhotos)) enterPass(passIndex + 1);
@@ -602,6 +640,7 @@ export function setupScanLab() {
   async function build() {
     setError();
     stopCamera();
+    stopPreparing();
     session?.dispose();
     session = null;
     splat = null;
@@ -631,7 +670,10 @@ export function setupScanLab() {
       holdout: -1,
       evalHoldEvery: 1e9,
       initTarget: 20000,
-      ...(phone ? { lowMem: true } : {}),
+      ...(phone ? { lowMem: true, frames: { targetBudgetBytes: 180e6 } } : {}),
+      // This UI only previews training cameras; no oversized orbit viewport.
+      maxViewW: 1,
+      maxViewH: 1,
       ...(gpu ? {} : { noGpu: true }),
       sfm: { ...solveTierOpts("quick"), uiYield: true, ...(phone ? { workers: 3 } : {}) },
       trainer: { maxSplats: phone ? 300000 : 600000, capMult: 8 },
@@ -667,7 +709,7 @@ export function setupScanLab() {
       if (event.kind === "device-lost") {
         stopClock();
         setState("idle");
-        setError("The GPU was reclaimed (the tab went to the background). Keep this tab open while it trains, then build again.");
+        setError("The browser released the GPU. This can happen under memory pressure or when the tab is backgrounded. Your photos are still here; keep this tab visible and build again.");
       }
     });
 
@@ -675,6 +717,13 @@ export function setupScanLab() {
       setProgress(STAGE_LABELS.decode, 0, `Processing ${photos.length} photos. Nothing leaves this device.`);
       scannedPhotos = photos.slice();
       await created.load(scannedPhotos);
+      // Only live captures have this cache; use exact dimensions and default
+      // feature settings so imported photos and custom solver settings stay safe.
+      const byName = new Map(scannedPhotos.map((file) => [file.name, preparedFeatures.get(file)]));
+      for (const frame of created.frames) {
+        const cached = byName.get(frame.name);
+        if (cached && cached.fw === frame.fw && cached.fh === frame.fh) frame.precomputedSift = cached.features;
+      }
       // live captures carry no EXIF lens data; without a starting focal the
       // solver's search can lock onto a wrong lens and scatter the cameras
       const frames = created.frames as { fw: number; fh: number; exif?: { f35?: number } | null }[];
@@ -682,6 +731,9 @@ export function setupScanLab() {
       await created.solve(tagged >= 0.6 * frames.length ? {} : {
         focalPrior: focalPxFrom35(PHONE_MAIN_LENS_MM, frames[0].fw, frames[0].fh),
       });
+      // Descriptor copies are no longer useful once the camera solve finishes.
+      byName.clear();
+      for (const file of scannedPhotos) preparedFeatures.delete(file);
       const placed = created.recon.cams.length;
       metricCameras.textContent = `${placed} / ${photos.length}`;
       if (placed < Math.max(6, 0.4 * photos.length)) {
@@ -972,6 +1024,6 @@ export function setupScanLab() {
   window.addEventListener("spatialdrop:modechange", (event) => {
     if ((event as CustomEvent<string>).detail !== "scan") stopCamera();
   });
-  window.addEventListener("pagehide", stopCamera);
+  window.addEventListener("pagehide", () => { stopCamera(); stopPreparing(); });
   renderPhotos();
 }

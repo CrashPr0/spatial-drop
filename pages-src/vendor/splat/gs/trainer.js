@@ -351,8 +351,8 @@ export class GSTrainer {
     this.bufGradF = buf(nb, B.STORAGE | B.COPY_SRC, 'gradF');
     this.bufM = buf(nb, B.STORAGE | B.COPY_DST | B.COPY_SRC, 'adam-m');
     this.bufV = buf(nb, B.STORAGE | B.COPY_DST | B.COPY_SRC, 'adam-v');
-    d.queue.writeBuffer(this.bufM, 0, new Float32Array(this.cap * STRIDE));
-    d.queue.writeBuffer(this.bufV, 0, new Float32Array(this.cap * STRIDE));
+    // Newly created WebGPU buffers are zero-initialized. Avoid two large
+    // CPU staging arrays and redundant uploads for the Adam moments.
     this.bufTileCnt = buf(this.maxTiles * 4, B.STORAGE | B.COPY_DST | B.COPY_SRC, 'tileCnt');
     this.bufTileStart = buf((this.maxTiles + 1) * 4, B.STORAGE | B.COPY_SRC, 'tileStart');
     this.bufTileCursor = buf(this.maxTiles * 4, B.STORAGE | B.COPY_SRC, 'tileCursor');

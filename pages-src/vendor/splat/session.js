@@ -299,7 +299,11 @@ export class Session {
     if (this.opts.lowMem) {
       // the feature-scale grayscale is solve-only (SIFT + LK); on phones
       // 50 frames of it is ~140MB standing between us and the trainer
-      for (const f of this.frames) f.gray = null;
+      for (const f of this.frames) {
+        f.gray = null;
+        // Live-capture descriptors are solve-only too.
+        delete f.precomputedSift;
+      }
     }
     this._stage({ stage: 'solved', done: 1, total: 1, detail: {
       cams: this.recon.cams.length, points: this.recon.points.length,
