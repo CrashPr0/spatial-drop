@@ -596,7 +596,7 @@ export function setupScanLab() {
         if (Math.max(sourceWidth, sourceHeight) <= 1920) preparePhoto(file);
         paintSteps();
         if (photos.length >= MAX_PHOTOS) return stopCamera();
-        if (passDone(pass(), coverageFraction(coverage), passPhotos)) enterPass(passIndex + 1);
+        if (passDone(pass(), coverageFraction(coverage), passPhotos, pose.elevation() !== null)) enterPass(passIndex + 1);
       }, "image/jpeg", 0.92);
     }, 120);
   }

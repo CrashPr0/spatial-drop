@@ -31,15 +31,15 @@ export interface ScanPass {
 
 export const PASSES: ScanPass[] = [
   {
-    id: "low", title: "Around", minElevation: -25, maxElevation: 25, budget: 24, goal: "ring",
+    id: "low", title: "Around", minElevation: -25, maxElevation: 25, budget: 30, goal: "ring",
     how: "Hold the phone level with the middle of the object and walk all the way around it.",
   },
   {
-    id: "high", title: "From above", minElevation: -65, maxElevation: -25, budget: 22, goal: "ring",
+    id: "high", title: "From above", minElevation: -65, maxElevation: -25, budget: 28, goal: "ring",
     how: "Raise the phone above the object, tilt it down at the object, and walk around it again.",
   },
   {
-    id: "top", title: "Over the top", minElevation: -90, maxElevation: -45, budget: 4, goal: "count", count: 4, continues: true,
+    id: "top", title: "Over the top", minElevation: -90, maxElevation: -45, budget: 5, goal: "count", count: 5, continues: true,
     how: "From where you are, move the phone up and over the object, tilting it down, and hold still at each stop.",
   },
 ];
@@ -67,5 +67,7 @@ export function passProgress(pass: ScanPass, coverage: number, photos: number) {
   return Math.max(0, Math.min(1, progress));
 }
 
-export const passDone = (pass: ScanPass, coverage: number, photos: number) =>
-  passProgress(pass, coverage, photos) >= 1 || photos >= pass.budget;
+// With real orientation readings, a photo count is not evidence of a full
+// orbit. Keep the count fallback for devices without usable sensors.
+export const passDone = (pass: ScanPass, coverage: number, photos: number, tracked = false) =>
+  passProgress(pass, coverage, photos) >= 1 || ((!tracked || pass.goal !== "ring") && photos >= pass.budget);
