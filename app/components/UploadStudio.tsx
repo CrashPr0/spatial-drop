@@ -195,6 +195,7 @@ export function UploadStudio() {
             onDrop={onDrop}
             onClick={() => inputRef.current?.click()}
             role="button"
+            aria-label="Choose a GLB model to publish"
             tabIndex={0}
             onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") inputRef.current?.click(); }}
           >
@@ -202,6 +203,7 @@ export function UploadStudio() {
               ref={inputRef}
               className="visually-hidden"
               type="file"
+              aria-label="Choose a GLB model to publish"
               accept=".glb,model/gltf-binary"
               onChange={(event: ChangeEvent<HTMLInputElement>) => acceptFile(event.target.files?.[0])}
             />
