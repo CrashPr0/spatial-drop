@@ -40,7 +40,7 @@ export interface ProjectionOptions {
 }
 
 /** Rasterize the mesh's camera-space depth (nearest surface) at a low resolution. */
-function depthBuffer(
+export function depthBuffer(
   world: Float32Array, indices: Uint32Array, R: ArrayLike<number>, t: ArrayLike<number>,
   fx: number, fy: number, cx: number, cy: number, width: number, height: number,
 ) {
