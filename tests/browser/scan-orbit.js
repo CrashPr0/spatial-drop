@@ -269,42 +269,55 @@ window.liveOrbit = async function liveOrbit({ seconds = 60, speed = 0.35, tremor
   const { THREE, renderer, scene } = await orbitScene();
   const cam = new THREE.PerspectiveCamera(55, 960 / 720, 0.01, 50);
   let angle = 0, direction = 1, running = true;
+  // how high the hand is: 0 the loop at the object's height, 1 the loop from
+  // above, 2 straight over the top, 3 down the far side (radius and height in
+  // meters, looking at y = 0.17; a negative radius is across the object)
+  let lift = 0;
+  const along = (u) => {
+    const stops = [[0.62, 0.22], [0.5, 0.6], [0.12, 0.75], [-0.5, 0.6]];
+    const i = Math.min(2, Math.floor(u)), f = Math.min(1, u - i);
+    return stops[i].map((v, k) => v + (stops[i + 1][k] - v) * f);
+  };
   const draw = () => {
     if (!running) return;
     // tremor: small random hand movement, in meters
     const j = () => (Math.random() - 0.5) * 2 * tremor;
-    cam.position.set(0.62 * Math.sin(angle) + j(), 0.22 + j(), 0.62 * Math.cos(angle) + j());
+    const [r, h] = along(lift);
+    cam.position.set(r * Math.sin(angle) + j(), h + j(), r * Math.cos(angle) + j());
     cam.lookAt(j() * 5, 0.17 + j() * 5, j() * 5);
-    // the camera at (sin a, cos a) faces heading -a: alpha is the compass turned counterclockwise
-    if (sensor) window.dispatchEvent(Object.assign(new Event('deviceorientation'), { alpha: ((angle * 180 / Math.PI) % 360 + 360) % 360, beta: 90, gamma: 0 }));
+    // alpha is the compass heading of the view turned counterclockwise (looking
+    // down -z is 0); beta below 90 tips the back camera down by that much
+    const look = new THREE.Vector3(0, 0.17, 0).sub(cam.position).normalize();
+    const elevation = Math.asin(look.y) * 180 / Math.PI;
+    const alpha = Math.atan2(-look.x, -look.z) * 180 / Math.PI;
+    if (sensor) window.dispatchEvent(Object.assign(new Event('deviceorientation'), { alpha: (alpha + 360) % 360, beta: 90 + elevation, gamma: 0 }));
     renderer.render(scene, cam);
     copy.drawImage(renderer.domElement, 0, 0);
-    requestAnimationFrame(draw);
   };
   // stream a 2D copy: a WebGL canvas outside the document barely streams at all
   const canvas = document.createElement('canvas');
   canvas.width = 960; canvas.height = 720;
   const copy = canvas.getContext('2d');
   const stream = canvas.captureStream(30);
+  // the page reads frames straight from this canvas: the browser pane plays
+  // canvas streams at a few fps or none, far below a phone camera
+  window.spatialDropCaptureSource = canvas;
   draw();
   navigator.mediaDevices.getUserMedia = async () => stream;
+  // Safari asks for motion access on a real tap; a scripted click is refused
+  if (window.DeviceOrientationEvent?.requestPermission) window.DeviceOrientationEvent.requestPermission = async () => (sensor ? 'granted' : 'denied');
   document.querySelector('#scan-clear-button').click();
   document.querySelector('#scan-camera-button').click();
-  // the browser pane plays canvas streams at a few fps, far below a phone
-  // camera's 30: walk one 30 fps step per frame the page actually shows, so
-  // each frame moves as far as it would on a phone (slow motion, same path)
-  const video = document.querySelector('#scan-video');
-  let shown = 0;
-  const onFrame = () => { shown++; if (running) video.requestVideoFrameCallback(onFrame); };
-  video.requestVideoFrameCallback(onFrame);
+  // the camera opens asynchronously: wait for it before walking
+  while (document.querySelector('#scan-stop-button').hidden) await new Promise((r) => setTimeout(r, 50));
   const log = [];
   const start = performance.now();
-  let stepped = 0, lastLine = '';
-  while (performance.now() - start < seconds * 1000) {
-    await new Promise((r) => setTimeout(r, 20));
+  let lastLine = '';
+  while (performance.now() - start < seconds * 1000 && !document.querySelector('#scan-stop-button').hidden) {
+    // one step of walking per capture check (every 120 ms), whatever the page's speed
+    await new Promise((r) => setTimeout(r, 120));
     const now = performance.now();
-    const steps = shown - stepped; stepped = shown;
-    const dt = steps / 30;
+    const dt = 0.12;
     const guide = document.querySelector('#scan-guide');
     const kind = guide.hidden ? 'countdown' : guide.className.replace('scan-guide ', '');
     const arrow = document.querySelector('#scan-arrow');
@@ -312,16 +325,24 @@ window.liveOrbit = async function liveOrbit({ seconds = 60, speed = 0.35, tremor
     // the arrow's right is the camera moving right, which raises the angle
     const toward = pointing === 'right' ? 1 : pointing === 'left' ? -1 : 0;
     if (!follow) angle += direction * speed * dt;
+    // "up" while moving: climb over the top a little at a time
+    else if (kind === 'move' && pointing === 'up') lift = Math.min(3, lift + 0.25 * dt);
     else if (kind === 'move') angle += (toward || direction) * speed * dt;
     else if (kind === 'lost') angle += (toward || -direction) * speed * dt;
-    const line = `${document.querySelector('#scan-photo-count').textContent} ${kind} ${document.querySelector('#scan-guide-text').textContent} ${pointing}`;
+    // raise or lower the phone when the tilt arrows say so
+    else if (kind === 'tilt') lift = Math.max(0, Math.min(3, lift + (pointing === 'up' ? 1 : -1) * 0.8 * dt));
+    const step = document.querySelector('#scan-steps [aria-current="step"]')?.dataset.pass ?? '-';
+    const line = `${step} ${document.querySelector('#scan-photo-count').textContent} ${kind} ${document.querySelector('#scan-guide-text').textContent} ${pointing}`;
     if (line !== lastLine) log.push(`${((now - start) / 1000).toFixed(1)}s ${(angle * 180 / Math.PI).toFixed(1)}° ${line}`);
     lastLine = line;
+    draw();
   }
   running = false;
-  document.querySelector('#scan-stop-button').click();
+  delete window.spatialDropCaptureSource;
+  if (!document.querySelector('#scan-stop-button').hidden) document.querySelector('#scan-stop-button').click();
   // the ring's own report of how much of the circle the photos cover
   const ringPercent = document.querySelector('#scan-ring .scan-ring-percent')?.textContent;
   const segmentsDone = document.querySelectorAll('#scan-ring .scan-ring-segment.done').length;
-  return { photos: +document.querySelector('#scan-photo-count').textContent, ringPercent, segmentsDone, degrees: Math.round(angle * 180 / Math.PI), fps: shown / seconds, log };
+  const stepsDone = [...document.querySelectorAll('#scan-steps li.done')].map((li) => li.dataset.pass);
+  return { photos: +document.querySelector('#scan-photo-count').textContent, stepsDone, ringPercent, segmentsDone, degrees: Math.round(angle * 180 / Math.PI), log };
 };

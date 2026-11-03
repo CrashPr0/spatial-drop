@@ -103,7 +103,8 @@ export function adviseCapture(match: FrameMatch | null, { keepBelow = 0.35, lost
 }
 
 export type Heading = -1 | 0 | 1;
-export type Arrow = "left" | "right" | "either" | null;
+/** left/right: around the object; up/down: raise or lower the phone */
+export type Arrow = "left" | "right" | "up" | "down" | "either" | null;
 
 /**
  * Which way to point. `heading` is the way the orbit has been going (+1:

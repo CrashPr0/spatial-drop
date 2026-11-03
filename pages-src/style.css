@@ -372,12 +372,34 @@ footer a { color: inherit; text-underline-offset: 3px; }
 /* two chevrons, one per side; the direction shows one, "either" shows both */
 .scan-arrow { position: absolute; z-index: 4; inset: 0; pointer-events: none; }
 .scan-arrow i { position: absolute; top: 50%; width: clamp(28px, 9vw, 48px); aspect-ratio: 1; margin-top: calc(clamp(28px, 9vw, 48px) / -2); border: solid var(--sjsu-gold); border-width: 0 8px 8px 0; filter: drop-shadow(0 2px 6px rgba(0, 0, 0, .6)); }
-.scan-arrow i:first-child { left: 7%; transform: rotate(135deg); animation: scanNudgeLeft 1s ease-in-out infinite; }
-.scan-arrow i:last-child { right: 7%; transform: rotate(-45deg); animation: scanNudgeRight 1s ease-in-out infinite; }
-.scan-arrow[data-direction="left"] i:last-child, .scan-arrow[data-direction="right"] i:first-child { display: none; }
+.scan-arrow i { display: none; }
+.scan-arrow i.left { left: 7%; transform: rotate(135deg); animation: scanNudgeLeft 1s ease-in-out infinite; }
+.scan-arrow i.right { right: 7%; transform: rotate(-45deg); animation: scanNudgeRight 1s ease-in-out infinite; }
+.scan-arrow i.up, .scan-arrow i.down { left: 50%; margin-left: calc(clamp(28px, 9vw, 48px) / -2); }
+.scan-arrow i.up { top: 14%; transform: rotate(-135deg); animation: scanNudgeUp 1s ease-in-out infinite; }
+.scan-arrow i.down { top: auto; bottom: 22%; transform: rotate(45deg); animation: scanNudgeDown 1s ease-in-out infinite; }
+.scan-arrow[data-direction="left"] i.left, .scan-arrow[data-direction="right"] i.right, .scan-arrow[data-direction="either"] :is(i.left, i.right),
+.scan-arrow[data-direction="up"] i.up, .scan-arrow[data-direction="down"] i.down { display: block; }
 .scan-guide.lost ~ .scan-arrow i, .scan-arrow:has(~ .scan-guide.lost) i { border-color: #ff8a80; }
 @keyframes scanNudgeLeft { 50% { translate: -10px 0; } }
 @keyframes scanNudgeRight { 50% { translate: 10px 0; } }
+@keyframes scanNudgeUp { 50% { translate: 0 -10px; } }
+@keyframes scanNudgeDown { 50% { translate: 0 10px; } }
+.scan-countdown.banner { font-size: clamp(20px, 5vw, 30px); line-height: 1.25; padding: 0 16px; text-align: center; }
+.scan-guide.tilt { background: rgba(9, 31, 56, .92); outline: 2px solid var(--sjsu-gold); }
+/* the guided steps: around, from above, over the top */
+.scan-steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 0 0 10px; padding: 0; list-style: none; }
+.scan-steps[hidden], .scan-step-how[hidden] { display: none; }
+.scan-steps li { position: relative; display: flex; align-items: center; gap: 6px; min-width: 0; padding: 7px 8px 10px; border: 1px solid rgba(255, 255, 255, .25); color: #9db8d0; font: 800 9px/1.2 monospace; letter-spacing: .06em; text-transform: uppercase; }
+.scan-steps li b { flex: none; display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; border: 1px solid currentColor; font-size: 10px; }
+.scan-steps li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scan-steps li i { position: absolute; left: 0; bottom: 0; height: 3px; width: calc(var(--progress, 0) * 100%); background: var(--sjsu-gold); transition: width .3s; }
+.scan-steps li[aria-current="step"] { border-color: var(--sjsu-gold); color: white; }
+.scan-steps li.done { color: var(--sjsu-gold); }
+.scan-steps li.done b { background: var(--sjsu-gold); color: var(--spartan-navy); border-color: var(--sjsu-gold); }
+.scan-step-how { margin: 0 0 10px; color: white; font-size: 13px; line-height: 1.4; }
+.scan-next-step { margin-top: 24px; color: #c9d9e7; }
+.scan-next-step[hidden] { display: none; }
 @media (prefers-reduced-motion: reduce) { .scan-arrow i { animation: none; } }
 .scan-countdown { position: absolute; z-index: 5; inset: 0; display: grid; place-content: center; color: white; font: 800 clamp(64px, 18vw, 120px)/1 monospace; text-shadow: 0 4px 24px rgba(0, 0, 0, .6); background: rgba(9, 31, 56, .35); pointer-events: none; }
 .scan-guide { position: absolute; z-index: 5; left: 50%; bottom: 12px; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; max-width: calc(100% - 24px); padding: 8px 12px; background: rgba(9, 31, 56, .82); color: white; font: 800 10px/1.3 monospace; letter-spacing: .05em; text-transform: uppercase; pointer-events: none; }

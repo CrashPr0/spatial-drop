@@ -16,8 +16,12 @@ export const LINK_OVERLAP = 0.1;
 export const MAX_LINK_DEG = 45;
 /** a segment counts as scanned from this fill on */
 export const SCANNED_FILL = 0.8;
-/** rough orbit travel for a fully new view, when only the image is available */
-const VISUAL_DEG_PER_LOSS = 35;
+/**
+ * Rough orbit travel for a fully new view, when only the image is available.
+ * Measured with the tile matcher on the synthetic orbit: 6° of travel loses
+ * 47% of the tiles, 10° 60%, 12° 73%, so about 16° per whole view.
+ */
+const VISUAL_DEG_PER_LOSS = 16;
 
 export interface Orientation { alpha: number; beta: number; gamma: number }
 
@@ -89,8 +93,11 @@ export const coverageFraction = (coverage: Coverage) => segmentFill(coverage).re
 /**
  * The nearest unscanned segment from `at`, and which way round to go for it.
  * `direction` is the ring direction: "cw" raises the angle, which is the
- * camera walking to the left. `prefer` breaks near-ties. Null when the ring
- * is complete.
+ * camera walking to the left. `prefer` is the way the orbit has been going:
+ * it is kept unless the open segments that way are over 90° farther than the
+ * ones behind. A plain nearest pick flips as the camera passes the middle of
+ * a half-filled segment, and an arrow that flips sends the person back and
+ * forth on the spot. Null when the ring is complete.
  */
 export function nearestGap(coverage: Coverage, at: number, prefer?: "cw" | "ccw") {
   const fill = segmentFill(coverage);
@@ -98,8 +105,7 @@ export function nearestGap(coverage: Coverage, at: number, prefer?: "cw" | "ccw"
   for (let i = 0; i < SEGMENTS; i++) {
     if (fill[i] >= SCANNED_FILL) continue;
     const d = turn(at, i * SEGMENT_DEG);
-    // near-ties go the way the orbit is already travelling
-    const degrees = Math.abs(d) - (prefer && (d >= 0) === (prefer === "cw") ? 5 : 0);
+    const degrees = Math.abs(d) + (prefer && (d >= 0) !== (prefer === "cw") ? 90 : 0);
     if (!best || degrees < best.degrees) best = { segment: i, direction: d >= 0 ? "cw" : "ccw", degrees };
   }
   return best;
@@ -143,6 +149,11 @@ export class PoseTracker {
   private reading: { heading: number; elevation: number } | null = null;
 
   get hasSensor() { return this.reading !== null; }
+
+  /** Elevation of the view in degrees (negative looking down), or null without a sensor. */
+  elevation(): number | null {
+    return this.reading?.elevation ?? null;
+  }
 
   /** Feed a DeviceOrientation reading. */
   sense(orientation: Orientation) {

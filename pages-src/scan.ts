@@ -3,6 +3,7 @@ import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
 import { adviseCapture, matchFrames, pointTo, shrink, type Arrow, type Heading } from "./scan-capture";
 import { addPhotoToCoverage, coverageFraction, createCoverage, missingSides, nearestGap, PoseTracker, ringPoint, segmentFill, segmentPath, SEGMENTS, SCANNED_FILL, type Orientation } from "./scan-coverage";
 import { cropToSubject } from "./scan-crop";
+import { PASSES, passDone, passProgress, tiltAdvice } from "./scan-passes";
 import { pointSplats } from "./scan-points";
 import { subjectCylinder, type ScanCamera, type Vec3 } from "./scan-mesh";
 import { buildUsdz } from "./scan-usdz";
@@ -22,6 +23,8 @@ const COUNTDOWN_SECONDS = 3;
 const HOLD_MS = 450;
 // after this long without a photo, keep the next steady frame even if the match looks lost
 const STUCK_MS = 4000;
+// how long the "next step" banner holds capture between steps
+const STEP_BANNER_MS = 2500;
 // 35 mm-equivalent focal of a typical phone main camera (iPhone and Pixel wide lenses: 24–26 mm)
 const PHONE_MAIN_LENS_MM = 26;
 const STAGE_LABELS: Record<string, string> = {
@@ -151,6 +154,10 @@ export function setupScanLab() {
   const guideText = $("#scan-guide-text");
   const arrow = $("#scan-arrow");
   const ring = $<HTMLElement>("#scan-ring");
+  const steps = $("#scan-steps");
+  const stepItems = PASSES.map((pass) => steps.querySelector<HTMLLIElement>(`[data-pass="${pass.id}"]`)!);
+  const stepHow = $("#scan-step-how");
+  const nextStepButton = $<HTMLButtonElement>("#scan-next-step");
   const ringSegments = Array.from({ length: SEGMENTS }, (_, i) => ring.querySelector<SVGPathElement>(`[data-segment="${i}"]`)!);
   ringSegments.forEach((segment, i) => segment.setAttribute("d", segmentPath(i)));
   const ringMarker = ring.querySelector<SVGCircleElement>(".scan-ring-marker")!;
@@ -271,7 +278,10 @@ export function setupScanLab() {
     countdown.hidden = true;
     guide.hidden = true;
     arrow.hidden = true;
-    ring.hidden = true;
+    ring.toggleAttribute("hidden", true);
+    nextStepButton.hidden = true;
+    stepHow.hidden = true;
+    countdown.classList.remove("banner");
     stopSensing();
     stopSensing = () => {};
     coverageNote = "";
@@ -291,7 +301,7 @@ export function setupScanLab() {
     // the compass and gyro give each photo's real direction around the object;
     // iOS asks for them on a tap, so this comes before the camera prompt
     const pose = new PoseTracker();
-    const coverage = createCoverage();
+    let coverage = createCoverage();
     stopSensing = await listenForOrientation((reading) => pose.sense(reading));
     try {
       stream = await navigator.mediaDevices.getUserMedia({
@@ -336,8 +346,60 @@ export function setupScanLab() {
       arrow.dataset.direction = direction ?? "";
     };
     let ringDirection: "cw" | "ccw" | undefined;
+    // the guided steps: around at the object's height, again from above, over the top
+    let passIndex = 0;
+    let passPhotos = 0;
+    let pausedUntil = 0;
+    const pass = () => PASSES[passIndex];
+    const paintSteps = () => {
+      steps.hidden = false;
+      stepItems.forEach((item, i) => {
+        const progress = i < passIndex ? 1 : i > passIndex ? 0 : passProgress(PASSES[i], coverageFraction(coverage), passPhotos);
+        item.style.setProperty("--progress", `${progress}`);
+        item.classList.toggle("done", i < passIndex);
+        if (i === passIndex) item.setAttribute("aria-current", "step");
+        else item.removeAttribute("aria-current");
+      });
+      stepHow.hidden = false;
+      stepHow.textContent = `Step ${passIndex + 1} of ${PASSES.length}: ${pass().how}`;
+      nextStepButton.textContent = passIndex < PASSES.length - 1 ? "Skip this step" : "Finish";
+    };
+    const banner = (text: string) => {
+      countdown.classList.add("banner");
+      countdown.textContent = text;
+      countdown.hidden = false;
+      guide.hidden = true;
+      arrow.hidden = true;
+      pausedUntil = performance.now() + STEP_BANNER_MS;
+    };
+    // each step is its own chain of photos and its own loop on the ring
+    const enterPass = (index: number) => {
+      if (index >= PASSES.length) {
+        passIndex = PASSES.length - 1;
+        stepItems.forEach((item) => { item.classList.add("done"); item.style.setProperty("--progress", "1"); item.removeAttribute("aria-current"); });
+        banner("All steps done");
+        window.setTimeout(() => {
+          stopCamera();
+          stepHow.hidden = false;
+          stepHow.textContent = "All three steps done. Build the model when you are ready.";
+        }, 1500);
+        return;
+      }
+      passIndex = index;
+      passPhotos = 0;
+      coverage = createCoverage();
+      if (!pass().continues) lastKept = null;
+      heading = 0;
+      ringDirection = undefined;
+      paintSteps();
+      paintRing();
+      if (index > 0) banner(`Step ${index + 1} · ${pass().title}`);
+    };
+    nextStepButton.hidden = false;
+    nextStepButton.onclick = () => enterPass(passIndex + 1);
     const paintRing = () => {
-      ring.hidden = false;
+      // over the top there is no loop to fill
+      ring.toggleAttribute("hidden", pass().goal !== "ring");
       segmentFill(coverage).forEach((fill, i) => {
         ringSegments[i].style.setProperty("--fill", `${Math.min(1, fill)}`);
         ringSegments[i].classList.toggle("done", fill >= SCANNED_FILL);
@@ -353,21 +415,29 @@ export function setupScanLab() {
       const percent = Math.round(coverageFraction(coverage) * 100);
       ringPercent.textContent = `${percent}%`;
       const open = missingSides(coverage);
-      coverageNote = coverage.last === null ? "" : open.length ? `${percent}% around · still open: ${open.join(", ")}` : "Full circle · try a higher loop";
+      coverageNote = pass().goal !== "ring" ? `Step ${passIndex + 1} · ${passPhotos} of ${pass().count} photos`
+        : coverage.last === null ? `Step ${passIndex + 1}` : open.length ? `Step ${passIndex + 1} · ${percent}% around · still open: ${open.join(", ")}` : `Step ${passIndex + 1} · full circle`;
     };
+    paintSteps();
     paintRing();
     captureTimer = window.setInterval(() => {
-      if (saving || !video.videoWidth || photos.length >= MAX_PHOTOS) return;
+      // the browser harness (tests/browser/scan-orbit.js) feeds frames from a canvas through this
+      const feed = import.meta.env.DEV ? (window as { spatialDropCaptureSource?: HTMLCanvasElement }).spatialDropCaptureSource : undefined;
+      const source: CanvasImageSource = feed ?? video;
+      const sourceWidth = feed?.width ?? video.videoWidth, sourceHeight = feed?.height ?? video.videoHeight;
+      if (saving || !sourceWidth || photos.length >= MAX_PHOTOS) return;
       const now = performance.now();
       if (now < countdownEnds) {
         countdown.textContent = `${Math.ceil((countdownEnds - now) / 1000)}`;
         return;
       }
+      if (now < pausedUntil) return;
       if (!countdown.hidden) {
         countdown.hidden = true;
+        countdown.classList.remove("banner");
         lastKeptAt = now;
       }
-      probeContext.drawImage(video, 0, 0, probe.width, probe.height);
+      probeContext.drawImage(source, 0, 0, probe.width, probe.height);
       const rgba = probeContext.getImageData(0, 0, probe.width, probe.height).data;
       const gray = new Float32Array(probe.width * probe.height);
       for (let i = 0; i < gray.length; i++) gray[i] = 0.299 * rgba[i * 4] + 0.587 * rgba[i * 4 + 1] + 0.114 * rgba[i * 4 + 2];
@@ -382,11 +452,25 @@ export function setupScanLab() {
       const jitter = previousFrame ? matchFrames(previousFrame, small.gray, small.width, small.height, { reach: 0.08 }) : null;
       previousFrame = small.gray;
       const steady = !!jitter && jitter.overlap >= 0.6 && Math.hypot(jitter.dx * small.width, jitter.dy * small.height) <= 2 && focus >= 0.7 * typical;
+      // photos only count inside the step's tilt band: a loop from above
+      // taken at table height would just repeat the first loop
+      const tilt = tiltAdvice(pass(), pose.elevation());
+      if (tilt === "raise" || tilt === "lower") {
+        holdingSince = 0;
+        paintRing();
+        ghost.hidden = true;
+        const text = tilt === "raise"
+          ? pass().id === "top" ? "Raise the phone higher and tilt it down at the object" : "Raise the phone and tilt it down at the object"
+          : pass().id === "low" ? "Lower the phone to the middle of the object" : "Lower the phone a little and look at the object";
+        return showGuide("tilt", text, 0, tilt === "raise" ? "up" : "down");
+      }
       let direction = pointTo(advice, match, heading, small.width);
+      // over the top the way on is up and over, not around
+      if (pass().goal !== "ring" && advice === "move") direction = "up";
       // with a real heading from the sensors, point at the nearest open side
       // of the ring instead of just carrying on the way the image shifted
       const here = pose.angle();
-      if (advice === "move" && here !== null) {
+      if (advice === "move" && here !== null && pass().goal === "ring") {
         const gap = nearestGap(coverage, here, ringDirection);
         // walking to the left raises the ring angle
         if (gap) direction = gap.direction === "cw" ? "left" : "right";
@@ -400,6 +484,7 @@ export function setupScanLab() {
       if (advice === "move") {
         holdingSince = 0;
         const wrongWay = heading && match && match.dx * small.width * heading <= -2;
+        if (pass().goal !== "ring") return showGuide("move", `Move up and over the top · ${matched}`, 0, direction);
         return showGuide("move", wrongWay ? "Other way · you've been here" : heading ? `Keep circling · ${matched}` : "Circle the object either way", 0, direction);
       }
       if (advice === "lost" && !stuck) {
@@ -421,6 +506,7 @@ export function setupScanLab() {
       if (before === null) pose.anchor();
       const at = pose.angleForKeep(before, match?.dx ?? 0, match?.overlap ?? 1);
       addPhotoToCoverage(coverage, at, match?.overlap ?? 1);
+      passPhotos++;
       if (before !== null) {
         const step = ((at - before + 540) % 360) - 180;
         if (Math.abs(step) >= 3) ringDirection = step > 0 ? "cw" : "ccw";
@@ -431,9 +517,9 @@ export function setupScanLab() {
       holdingSince = 0;
       saving = true;
       const frame = document.createElement("canvas");
-      frame.width = video.videoWidth;
-      frame.height = video.videoHeight;
-      frame.getContext("2d")!.drawImage(video, 0, 0);
+      frame.width = sourceWidth;
+      frame.height = sourceHeight;
+      frame.getContext("2d")!.drawImage(source, 0, 0);
       frame.toBlob((blob) => {
         saving = false;
         if (!blob || !stream) return;
@@ -443,7 +529,9 @@ export function setupScanLab() {
         if (ghost.src) URL.revokeObjectURL(ghost.src);
         ghost.src = URL.createObjectURL(blob);
         addPhoto(new File([blob], `capture_${String(photos.length).padStart(3, "0")}.jpg`, { type: "image/jpeg" }));
-        if (photos.length >= MAX_PHOTOS) stopCamera();
+        paintSteps();
+        if (photos.length >= MAX_PHOTOS) return stopCamera();
+        if (passDone(pass(), coverageFraction(coverage), passPhotos)) enterPass(passIndex + 1);
       }, "image/jpeg", 0.92);
     }, 120);
   }

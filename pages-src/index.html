@@ -101,21 +101,28 @@
         <section class="scan-workbench">
           <article class="scanner-card scan-capture-card">
             <div class="receiver-transport-switch"><span>01 · CAPTURE</span><strong class="scan-count"><b id="scan-photo-count">0</b> PHOTOS</strong></div>
+            <ol id="scan-steps" class="scan-steps" aria-label="Scan steps" hidden>
+              <li data-pass="low"><b>1</b><span>Around</span><i></i></li>
+              <li data-pass="high"><b>2</b><span>From above</span><i></i></li>
+              <li data-pass="top"><b>3</b><span>Over the top</span><i></i></li>
+            </ol>
+            <p id="scan-step-how" class="scan-step-how" aria-live="polite" hidden></p>
             <div class="scanner-viewport scan-viewport">
               <video id="scan-video" playsinline muted aria-label="Scan camera preview"></video>
               <img id="scan-ghost" class="scan-ghost" alt="" hidden />
               <div class="scanner-reticle" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
               <svg id="scan-ring" class="scan-ring" viewBox="0 0 100 100" role="img" aria-label="Scan coverage around the object" hidden><path data-segment="0" class="scan-ring-segment" /><path data-segment="1" class="scan-ring-segment" /><path data-segment="2" class="scan-ring-segment" /><path data-segment="3" class="scan-ring-segment" /><path data-segment="4" class="scan-ring-segment" /><path data-segment="5" class="scan-ring-segment" /><path data-segment="6" class="scan-ring-segment" /><path data-segment="7" class="scan-ring-segment" /><path data-segment="8" class="scan-ring-segment" /><path data-segment="9" class="scan-ring-segment" /><path data-segment="10" class="scan-ring-segment" /><path data-segment="11" class="scan-ring-segment" /><circle class="scan-ring-marker" r="3.6" /><text class="scan-ring-percent" x="50" y="53" text-anchor="middle">0%</text></svg>
-              <div id="scan-arrow" class="scan-arrow" aria-hidden="true" hidden><i></i><i></i></div>
+              <div id="scan-arrow" class="scan-arrow" aria-hidden="true" hidden><i class="left"></i><i class="right"></i><i class="up"></i><i class="down"></i></div>
               <div id="scan-countdown" class="scan-countdown" aria-live="assertive" hidden></div>
               <div id="scan-guide" class="scan-guide" aria-live="polite" hidden><span id="scan-guide-ring" class="scan-guide-ring"></span><span id="scan-guide-text"></span></div>
               <div id="scan-idle" class="scanner-idle"><span>ORBIT CAPTURE</span><strong>Camera is off</strong></div>
             </div>
-            <p class="scan-tip"><b>How to scan:</b> put the object on a textured table in even light. Circle it slowly at arm's length, then do a second, higher loop. Follow the arrow around the object and watch the ring in the corner: each segment fills as that side is photographed, and the arrow points at the nearest side still open. Stop when it says hold, and hold still while the small circle fills. If it says you went too far, go back the way the arrow points until the faded last photo lines up.</p>
+            <p class="scan-tip"><b>How to scan:</b> put the object on a textured table in even light and tap Start. The scan walks you through three steps: around the object at its height, around again from above, then a few photos over the top. Follow the arrows, stop when it says hold, and keep still while the small circle fills. The ring in the corner fills as each side is photographed.</p>
             <p id="scan-capture-hint" class="scan-hint">12 more to start · 30–60 recommended</p>
             <div class="scanner-controls">
               <button id="scan-camera-button" class="primary" type="button"><span>Start capture</span><span>●</span></button>
               <button id="scan-stop-button" class="secondary-button" type="button" hidden>Stop capture</button>
+              <button id="scan-next-step" class="text-button scan-next-step" type="button" hidden>Skip this step</button>
             </div>
             <div id="scan-drop-zone" class="drop-zone scan-drop-zone" role="button" tabindex="0">
               <input id="scan-file-input" type="file" accept="image/*,video/*" multiple hidden />
