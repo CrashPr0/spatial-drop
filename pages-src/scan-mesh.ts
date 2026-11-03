@@ -45,7 +45,25 @@ export interface MeshOptions {
   targetTriangles?: number;
   /** solved cameras: carve the solid from what they see instead of trusting the splat to form a closed shell */
   views?: CameraModel[];
+  /**
+   * The object's own region from subjectCylinder. With it, the crop follows
+   * the object instead of the camera ring (`crop` then scales it: 0.45 = as
+   * found), and loose pieces off the object's center column are dropped.
+   */
+  subject?: SubjectRegion;
 }
+
+/** A vertical cylinder in the orbit frame: local = rotation · (world − center), +Y up. */
+export interface SubjectRegion {
+  center: Vec3;
+  rotation: number[];
+  radius: number;
+  bottom: number;
+  top: number;
+}
+
+/** the Crop control's default: the subject region as found */
+const DEFAULT_CROP = 0.45;
 
 export interface ScanMesh {
   positions: Float32Array;
@@ -248,11 +266,51 @@ function orbitFrame(cameras: ScanCamera[], fallbackCenter: () => Vec3) {
   return { center, basis, reach, ring };
 }
 
+/**
+ * Points standing on the floor, grouped from above: the cluster under the
+ * orbit's axis is the object. Neighbors on the same table (a bottle beside a
+ * can) are their own clusters a few centimeters away, so they stay out even
+ * though they sit well inside the ring of cameras. Cells are 4% of the ring
+ * radius; a one-cell bridge joins cells up to two apart, which keeps sparse
+ * patches of one object together.
+ */
+export function objectCluster(points: Vec3[], ring: number, { cellFraction = 0.04, near = 0.15 } = {}) {
+  const cell = cellFraction * ring;
+  const key = (gx: number, gz: number) => `${gx},${gz}`;
+  const cells = new Map<string, number[]>();
+  points.forEach((p, i) => {
+    const id = key(Math.floor(p[0] / cell), Math.floor(p[2] / cell));
+    const list = cells.get(id);
+    if (list) list.push(i); else cells.set(id, [i]);
+  });
+  // start from the occupied cell nearest the axis, if one is near enough to be the object
+  let start: string | null = null;
+  let best = near * ring;
+  for (const id of cells.keys()) {
+    const [gx, gz] = id.split(",").map(Number);
+    const d = Math.hypot((gx + 0.5) * cell, (gz + 0.5) * cell);
+    if (d <= best) { best = d; start = id; }
+  }
+  if (start === null) return [];
+  const seen = new Set([start]);
+  const queue = [start];
+  while (queue.length) {
+    const [gx, gz] = queue.pop()!.split(",").map(Number);
+    for (let dz = -2; dz <= 2; dz++) for (let dx = -2; dx <= 2; dx++) {
+      const id = key(gx + dx, gz + dz);
+      if (seen.has(id) || !cells.has(id)) continue;
+      seen.add(id);
+      queue.push(id);
+    }
+  }
+  return [...seen].flatMap((id) => cells.get(id)!).map((i) => points[i]);
+}
+
 /** A conservative vertical cylinder around the scanned object, from the solver's
  *  sparse points, before any training: the region worth training at all. */
-export function subjectCylinder(points: Vec3[], cameras: ScanCamera[], options: { crop?: number; pad?: number } = {}) {
+export function subjectCylinder(points: Vec3[], cameras: ScanCamera[], options: { crop?: number; pad?: number } = {}): SubjectRegion {
   const { center, basis, reach, ring } = orbitFrame(cameras, () => [0, 1, 2].map((k) => median(points.map((p) => p[k]))) as Vec3);
-  const radius = (options.crop ?? 0.45) * ring;
+  const radius = (options.crop ?? DEFAULT_CROP) * ring;
   const inside = points.map((p) => apply(basis, sub(p, center)))
     .filter((p) => Math.hypot(p[0], p[2]) <= radius && Math.abs(p[1]) <= reach);
   const generous = { center, rotation: basis, radius, bottom: -reach, top: reach };
@@ -260,7 +318,9 @@ export function subjectCylinder(points: Vec3[], cameras: ScanCamera[], options: 
   // the lowest band is the table under the object; what stands above it is the object
   const heights = inside.map((p) => p[1]).sort((a, b) => a - b);
   const floor = heights[Math.floor(0.02 * (heights.length - 1))];
-  const object = inside.filter((p) => p[1] > floor + 0.1 * radius);
+  const standing = inside.filter((p) => p[1] > floor + 0.1 * radius);
+  // the object is the cluster under the axis, not everything inside the ring
+  const object = objectCluster(standing, ring);
   if (object.length < 30) return generous;
   const spread = object.map((p) => Math.hypot(p[0], p[2])).sort((a, b) => a - b);
   const tops = object.map((p) => p[1]).sort((a, b) => a - b);
@@ -280,10 +340,10 @@ export function subjectCylinder(points: Vec3[], cameras: ScanCamera[], options: 
 }
 
 export function prepareSubject(cloud: SplatCloud, cameras: ScanCamera[], options: MeshOptions = {}) {
-  const crop = options.crop ?? 0.45;
+  const crop = options.crop ?? DEFAULT_CROP;
   const { data, n } = cloud;
   // no orbit: the opacity-weighted median of the splats is the best guess
-  const { center, basis, reach, ring } = orbitFrame(cameras, () => {
+  const frame = orbitFrame(cameras, () => {
     const xs: number[] = [], ys: number[] = [], zs: number[] = [];
     for (let i = 0; i < n; i++) {
       if (sigmoid(data[i * STRIDE + 13]) < 0.5) continue;
@@ -291,7 +351,19 @@ export function prepareSubject(cloud: SplatCloud, cameras: ScanCamera[], options
     }
     return [median(xs), median(ys), median(zs)];
   });
-  const radius = crop * ring;
+  const { reach, ring } = frame;
+  const subjectRegion = options.subject;
+  const center = subjectRegion?.center ?? frame.center;
+  const basis = subjectRegion?.rotation ?? frame.basis;
+  // the object's own region when it is known; the Crop control scales it
+  const radius = subjectRegion ? subjectRegion.radius * (crop / DEFAULT_CROP) : crop * ring;
+  const top = subjectRegion ? subjectRegion.top : reach;
+  // the table is found over the camera ring's crop even when the object is
+  // small: a crop hugging the object leaves only a thin rim of table, and the
+  // plane fit locks onto a face of the object instead (synthetic box: 2.9 mm
+  // with the wide plane search, 11.7-26 mm when it searched the object region)
+  const tableRadius = subjectRegion ? DEFAULT_CROP * ring : radius;
+  const gather = Math.max(radius, tableRadius);
   const sh = cloud.dc === "sh";
   const splats: PreparedSplat[] = [];
   for (let i = 0; i < n; i++) {
@@ -300,7 +372,7 @@ export function prepareSubject(cloud: SplatCloud, cameras: ScanCamera[], options
     // faint splats matter: flat faces are often many layered low-opacity Gaussians
     if (alpha < 0.03) continue;
     const local = apply(basis, sub([data[o], data[o + 1], data[o + 2]], center));
-    if (Math.hypot(local[0], local[2]) > radius || Math.abs(local[1]) > reach) continue;
+    if (Math.hypot(local[0], local[2]) > gather || Math.abs(local[1]) > reach) continue;
     let qw = data[o + 6], qx = data[o + 7], qy = data[o + 8], qz = data[o + 9];
     const ql = Math.hypot(qw, qx, qy, qz) || 1;
     qw /= ql; qx /= ql; qy /= ql; qz /= ql;
@@ -329,7 +401,7 @@ export function prepareSubject(cloud: SplatCloud, cameras: ScanCamera[], options
   if (options.removeGround !== false) {
     const solid = splats.filter((splat) => splat.alpha > 0.5).map((splat) => splat.position);
     // a trained splat surface is a few percent of the subject radius thick
-    const ground = findGround(solid, 0.04 * radius);
+    const ground = findGround(solid, 0.04 * tableRadius);
     if (ground) {
       // level the subject on the ground plane, then cut the plane away
       level = rotationBetween(ground.normal, [0, 1, 0]);
@@ -339,13 +411,14 @@ export function prepareSubject(cloud: SplatCloud, cameras: ScanCamera[], options
       }
       // cut a little above the plane so table splats stay out; the base is rebuilt down to the plane later
       groundY = ground.offset;
-      floor = ground.offset + 0.06 * radius;
+      floor = ground.offset + 0.06 * tableRadius;
       groundRemoved = true;
     }
   }
-  const subject = splats.filter((splat) => splat.position[1] > floor);
+  // then keep the object's own region
+  const subject = splats.filter((splat) => splat.position[1] > floor && splat.position[1] <= top && Math.hypot(splat.position[0], splat.position[2]) <= radius);
   // local = level · basis · (world − center)
-  return { splats: subject, radius, floor, groundY, groundRemoved, transform: { center: center as Vec3, basis, level } };
+  return { splats: subject, radius, floor, groundY, groundRemoved, transform: { center: center as Vec3, basis, level }, hasRegion: !!subjectRegion };
 }
 
 interface Grid {
@@ -411,7 +484,7 @@ function bfsLayers(grid: Grid, seeds: Int32Array | number[], passable: (i: numbe
 /** Fill the enclosed interior of a voxel shell, drop floaters, return a solid mask.
  *  `floorLayer` (>= 0) seals the shell from below: nobody photographs the
  *  underside of an object resting on a table, so scans are open at the bottom. */
-function solidify(occupied: Uint8Array, grid: Grid, floorLayer: number, closing = 2) {
+function solidify(occupied: Uint8Array, grid: Grid, floorLayer: number, closing = 2, core?: (i: number) => boolean) {
   const [nx, ny, nz] = grid.dims;
   const total = nx * ny * nz;
   const occupiedList: number[] = [];
@@ -448,12 +521,12 @@ function solidify(occupied: Uint8Array, grid: Grid, floorLayer: number, closing 
     }
   }
 
-  return keepBody(solid, grid);
+  return keepBody(solid, grid, core);
 }
 
 /** Opening: erode one voxel so thin sheets (leftover table, wall slivers)
  *  detach from the body, pick the body, then grow it back inside the solid. */
-function keepBody(solid: Uint8Array, grid: Grid) {
+function keepBody(solid: Uint8Array, grid: Grid, core?: (i: number) => boolean) {
   const [nx, ny, nz] = grid.dims;
   const total = nx * ny * nz;
   const eroded = new Uint8Array(total);
@@ -464,7 +537,7 @@ function keepBody(solid: Uint8Array, grid: Grid) {
     for (const [dx, dy, dz] of NEIGHBORS) if (!solid[index(grid, x + dx, y + dy, z + dz)]) { inner = 0; break; }
     eroded[i] = inner;
   }
-  const body = largestParts(eroded, grid);
+  const body = largestParts(eroded, grid, core);
   const seeds: number[] = [];
   for (let i = 0; i < total; i++) if (body[i]) seeds.push(i);
   const regrown = bfsLayers(grid, seeds, (i) => solid[i] === 1, 1);
@@ -472,8 +545,13 @@ function keepBody(solid: Uint8Array, grid: Grid) {
   return solid;
 }
 
-/** Keep the largest connected part and any part at least 15% of its size. */
-function largestParts(solid: Uint8Array, grid: Grid) {
+/**
+ * Keep the largest connected part and any part at least 15% of its size.
+ * With a `core` (the voxels on the object's center column), keep instead the
+ * parts that reach the core: a neighbor's leftover can be big, but it stands
+ * off to the side.
+ */
+function largestParts(solid: Uint8Array, grid: Grid, core?: (i: number) => boolean) {
   const [nx, ny, nz] = grid.dims;
   const total = nx * ny * nz;
   const label = new Int32Array(total).fill(-1);
@@ -498,6 +576,14 @@ function largestParts(solid: Uint8Array, grid: Grid) {
       }
     }
     sizes.push(tail);
+  }
+  if (core) {
+    const central = new Set<number>();
+    for (let i = 0; i < total; i++) if (solid[i] && core(i)) central.add(label[i]);
+    if (central.size) {
+      for (let i = 0; i < total; i++) if (solid[i] && !central.has(label[i])) solid[i] = 0;
+      return solid;
+    }
   }
   const largest = Math.max(0, ...sizes);
   for (let i = 0; i < total; i++) if (solid[i] && sizes[label[i]] < 0.15 * largest) solid[i] = 0;
@@ -748,7 +834,7 @@ function carveFromViews(
 
 export function buildScanMesh(cloud: SplatCloud, cameras: ScanCamera[], options: MeshOptions = {}): ScanMesh {
   const resolution = options.resolution ?? 96;
-  const { splats, groundRemoved, floor, groundY, transform } = prepareSubject(cloud, cameras, options);
+  const { splats, groundRemoved, floor, groundY, transform, radius, hasRegion } = prepareSubject(cloud, cameras, options);
   if (splats.length < 50) throw new Error("Too little of the scan landed on the subject. Widen the crop or rescan closer to the object.");
 
   // grid around the robust extent of the subject (ignores the last stray splats)
@@ -837,11 +923,17 @@ export function buildScanMesh(cloud: SplatCloud, cameras: ScanCamera[], options:
   // on the synthetic orbit: 6 mm mean error with every splat, 14-16 mm once the
   // faint ones drop out). Carving from the cameras does not need a closed shell,
   // and the union keeps the density's detail where the shell is sound.
-  const solid = solidify(occupied, grid, floorVoxel);
+  // with the object's region known, its center column says which parts are the object
+  const coreRadius = 0.35 * radius;
+  const core = hasRegion ? (i: number) => {
+    const x = grid.origin[0] + (i % nx + 0.5) * cell, z = grid.origin[2] + (Math.floor(i / (nx * ny)) + 0.5) * cell;
+    return Math.hypot(x, z) <= coreRadius;
+  } : undefined;
+  const solid = solidify(occupied, grid, floorVoxel, 2, core);
   if (options.views?.length) {
     const carved = carveFromViews(splats, transform, grid, options.views, floorVoxel);
     for (let i = 0; i < total; i++) solid[i] |= carved[i];
-    keepBody(solid, grid);
+    keepBody(solid, grid, core);
   }
   if (groundRemoved) {
     // the cut above the table left the base short: extend its footprint straight down to the ground

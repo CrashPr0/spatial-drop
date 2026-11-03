@@ -415,7 +415,8 @@ footer a { color: inherit; text-underline-offset: 3px; }
 .scan-drop-zone.disabled { pointer-events: none; opacity: .5; }
 .scan-thumbs { display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; }
 .scan-thumbs img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; border: 1px solid rgba(255, 255, 255, .2); }
-.scan-clear { align-self: flex-start; margin-top: 12px; color: #c9d9e7; }
+.scan-photo-actions { display: flex; flex-wrap: wrap; gap: 18px; margin-top: 12px; }
+.scan-clear { align-self: flex-start; color: #c9d9e7; }
 .scan-clear:disabled { opacity: .4; cursor: default; }
 .scan-detail { min-height: 48px; color: var(--muted); font-size: 13px; line-height: 1.5; }
 .scan-live-canvas { display: block; width: 100%; height: auto; background: #0e2e53; }

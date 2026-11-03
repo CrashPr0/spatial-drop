@@ -39,3 +39,6 @@ yarn-error.log*
 /.wrangler/
 /outputs/
 /work/
+
+# real captures from "Download photos", for rebuilding scans locally
+.scans/

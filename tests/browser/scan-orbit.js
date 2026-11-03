@@ -83,7 +83,7 @@ window.scanStatus = () => ({
   err: document.querySelector('#scan-error').hidden ? null : document.querySelector('#scan-error').textContent,
 });
 window.loadSaved = (key = 'last') => new Promise((res) => { const r = indexedDB.open('scan-dev', 1); r.onupgradeneeded = () => r.result.createObjectStore('k'); r.onsuccess = () => { const g = r.result.transaction('k').objectStore('k').get(key); g.onsuccess = () => res(g.result); }; });
-window.saveScan = (key = 'last') => new Promise((res, rej) => { const s = window.spatialDropScan; const ses = s.session; const names = ses.recon.cams.map((k) => ses.frames[k.imgIdx].name); const r = indexedDB.open('scan-dev', 1); r.onupgradeneeded = () => r.result.createObjectStore('k'); r.onsuccess = () => { const tx = r.result.transaction('k', 'readwrite'); tx.objectStore('k').put({ data: s.splat.data, n: s.splat.n, dc: s.splat.dc, cameras: s.cameras, viewMetas: s.viewMetas, names }, key); tx.oncomplete = () => res(true); tx.onerror = rej; }; });
+window.saveScan = (key = 'last') => new Promise((res, rej) => { const s = window.spatialDropScan; const ses = s.session; const names = ses.recon.cams.map((k) => ses.frames[k.imgIdx].name); const r = indexedDB.open('scan-dev', 1); r.onupgradeneeded = () => r.result.createObjectStore('k'); r.onsuccess = () => { const tx = r.result.transaction('k', 'readwrite'); tx.objectStore('k').put({ data: s.splat.data, n: s.splat.n, dc: s.splat.dc, cameras: s.cameras, viewMetas: s.viewMetas, names, subject: s.subject, points: ses.recon.points.map((p) => ({ X: Array.from(p.X), rgb: Array.from(p.rgb) })) }, key); tx.oncomplete = () => res(true); tx.onerror = rej; }; });
 
 // Signed distance to the true scene (meters, +Y up, floor at 0), matching a mesh built with heightMeters: 0.41.
 const sdfBox = (p) => {
@@ -92,7 +92,15 @@ const sdfBox = (p) => {
   const q = [Math.abs(x) - 0.09, Math.abs(y) - 0.13, Math.abs(z) - 0.07];
   return Math.hypot(Math.max(q[0], 0), Math.max(q[1], 0), Math.max(q[2], 0)) + Math.min(Math.max(q[0], q[1], q[2]), 0);
 };
-const groundTruthSdf = (p) => Math.min(sdfBox(p), Math.hypot(p[0], p[1] - 0.33, p[2]) - 0.08);
+const boxAndSphereSdf = (p) => Math.min(sdfBox(p), Math.hypot(p[0], p[1] - 0.33, p[2]) - 0.08);
+// the can in makeCan(): 6.6 cm across, 16.8 cm tall, standing on the floor (heightMeters: 0.168)
+const canSdf = (p) => {
+  const dr = Math.hypot(p[0], p[2]) - 0.033, dy = Math.abs(p[1] - 0.084) - 0.084;
+  return Math.hypot(Math.max(dr, 0), Math.max(dy, 0)) + Math.min(Math.max(dr, dy), 0);
+};
+let groundTruthSdf = boxAndSphereSdf;
+/** Measure shapeError against 'can' (makeCan) or 'box' (makeOrbit), e.g. after reloading a saved scan. */
+window.useGroundTruth = (name) => { groundTruthSdf = name === 'can' ? canSdf : boxAndSphereSdf; };
 
 /** Shape error of a scan mesh against the known scene, after the best turn and shift about +Y. */
 window.shapeError = (mesh) => {
@@ -345,4 +353,122 @@ window.liveOrbit = async function liveOrbit({ seconds = 60, speed = 0.35, tremor
   const segmentsDone = document.querySelectorAll('#scan-ring .scan-ring-segment.done').length;
   const stepsDone = [...document.querySelectorAll('#scan-steps li.done')].map((li) => li.dataset.pass);
   return { photos: +document.querySelector('#scan-photo-count').textContent, stepsDone, ringPercent, segmentsDone, degrees: Math.round(angle * 180 / Math.PI), log };
+};
+
+// A thin object among clutter, like a drinks can on a busy shelf: the case the
+// box-and-sphere orbit never tests. The can is 6.6 x 16.8 cm with a printed
+// label; a bottle, a box and a mug stand 12-16 cm from it and a shelf rises
+// behind. Photos follow the guided capture: a loop at the can's height, one
+// from above, then a climb over the top. After this, shapeError() measures
+// against the can alone, so anything of the clutter left in the mesh counts.
+//   await makeCan();                       // renders the photos and builds
+//   await canResult();                     // waits, then shape and size of the model
+window.makeCan = async function makeCan({ build = true, clutter = true } = {}) {
+  const THREE = await import(new URL('../../node_modules/three/build/three.module.js', import.meta.url).href);
+  let seed = 11; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const tex = (base, n, size = 512, draw) => {
+    const c = document.createElement('canvas'); c.width = c.height = size; const g = c.getContext('2d');
+    g.fillStyle = base; g.fillRect(0, 0, size, size);
+    for (let i = 0; i < n; i++) {
+      const x = rnd() * size, y = rnd() * size, r = size * (0.03 + rnd() * 0.1);
+      const grad = g.createRadialGradient(x, y, 0, x, y, r);
+      grad.addColorStop(0, `hsla(${rnd() * 360},${40 + rnd() * 40}%,${30 + rnd() * 45}%,0.9)`); grad.addColorStop(1, 'hsla(0,0%,50%,0)');
+      g.fillStyle = grad; g.fillRect(x - r, y - r, 2 * r, 2 * r);
+    }
+    for (let i = 0; i < n / 3; i++) { g.fillStyle = `hsl(${rnd() * 360},60%,${20 + rnd() * 60}%)`; g.fillRect(rnd() * size, rnd() * size, 4 + rnd() * size / 30, 4 + rnd() * size / 30); }
+    draw?.(g, size);
+    const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+  };
+  const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+  renderer.setSize(960, 720, false);
+  const scene = new THREE.Scene();
+  scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+  const sun = new THREE.DirectionalLight(0xffffff, 1.6); sun.position.set(1, 2, 1.5); scene.add(sun);
+  const faces = (base) => Array.from({ length: 6 }, () => new THREE.MeshStandardMaterial({ map: tex(base, 120, 1024), side: THREE.BackSide }));
+  const room = new THREE.Mesh(new THREE.BoxGeometry(4, 3, 4), faces('#d8d4cc')); room.position.y = 1.2; scene.add(room);
+  const table = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 1.2), new THREE.MeshStandardMaterial({ map: tex('#9a7b5a', 220, 1024) }));
+  table.rotation.x = -Math.PI / 2; scene.add(table);
+  // the can: a printed label all round, a metal top
+  const label = tex('#e8ecef', 40, 1024, (g, size) => {
+    g.fillStyle = '#111'; g.font = `900 ${size / 5}px sans-serif`; g.save(); g.translate(size * 0.55, size * 0.95); g.rotate(-Math.PI / 2); g.fillText('GHOST', 0, 0); g.restore();
+    g.font = `700 ${size / 22}px sans-serif`; for (let i = 0; i < 14; i++) g.fillText('ENERGY · 16 FL OZ', size * 0.62, size * (0.07 * i + 0.05));
+  });
+  const can = new THREE.Mesh(new THREE.CylinderGeometry(0.033, 0.033, 0.168, 64, 1, false), [
+    new THREE.MeshStandardMaterial({ map: label }), new THREE.MeshStandardMaterial({ map: tex('#9aa0a6', 30, 256) }), new THREE.MeshStandardMaterial({ color: '#777' }),
+  ]);
+  can.position.y = 0.084; scene.add(can);
+  if (clutter) {
+    const props = [
+      [new THREE.CylinderGeometry(0.035, 0.035, 0.22, 32), '#2a6', [-0.13, 0.11, -0.08]],
+      [new THREE.BoxGeometry(0.09, 0.07, 0.06), '#c63', [0.13, 0.035, 0.04]],
+      [new THREE.CylinderGeometry(0.04, 0.036, 0.09, 32), '#36c', [0.04, 0.045, -0.15]],
+      [new THREE.BoxGeometry(0.9, 0.5, 0.03), '#456', [0, 0.25, -0.42]],
+      [new THREE.BoxGeometry(0.9, 0.025, 0.25), '#222', [0, 0.3, -0.3]],
+    ];
+    for (const [geo, base, at] of props) { const m = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ map: tex(base, 60, 512) })); m.position.set(...at); scene.add(m); }
+  }
+  const cam = new THREE.PerspectiveCamera(55, 960 / 720, 0.01, 50);
+  const target = new THREE.Vector3(0, 0.084, 0);
+  const files = [];
+  const shoot = async (x, y, z) => {
+    cam.position.set(x, y, z); cam.lookAt(target); renderer.render(scene, cam);
+    const blob = await new Promise((res) => renderer.domElement.toBlob(res, 'image/jpeg', 0.93));
+    files.push(new File([blob], `orbit_${String(files.length).padStart(2, '0')}.jpg`, { type: 'image/jpeg' }));
+  };
+  // arm's length round a small object is close: about 30 cm; 32 photos a loop,
+  // about the guided capture's spacing (wider steps leave the low loop unplaced)
+  for (const [r, h, offset] of [[0.3, 0.1, 0], [0.24, 0.3, 0.1]]) for (let i = 0; i < 32; i++) {
+    const a = (i / 32) * Math.PI * 2 + offset;
+    await shoot(r * Math.sin(a), h, r * Math.cos(a));
+  }
+  // the climb over the top, continuing from the last photo of the loop above
+  const a0 = (31 / 32) * Math.PI * 2 + 0.1;
+  for (let k = 1; k <= 4; k++) { const t = k / 5, r = 0.24 * (1 - t) + 0.04 * t, h = 0.3 + 0.12 * t; await shoot(r * Math.sin(a0), h, r * Math.cos(a0)); }
+  renderer.dispose();
+  groundTruthSdf = canSdf;
+  window.__orbitFiles = files;
+  document.querySelector('#scan-height').value = '16.8';
+  document.querySelector('#scan-clear-button').click();
+  const dt = new DataTransfer(); files.forEach((f) => dt.items.add(f));
+  const input = document.querySelector('#scan-file-input'); input.files = dt.files; input.dispatchEvent(new Event('change'));
+  window.__t0 = performance.now();
+  if (build) document.querySelector('#scan-build-button').click();
+  return files.length;
+};
+
+/** Wait for the model, then measure it against the can: shape, size, timing. */
+window.canResult = async () => {
+  while (window.scanStatus().title !== 'Model ready' && !window.scanStatus().err) await new Promise((r) => setTimeout(r, 1000));
+  if (window.scanStatus().err) return { err: window.scanStatus().err };
+  const s = window.spatialDropScan; const M = await import('/scan-mesh.ts');
+  const mesh = M.buildScanMesh(s.splat, s.cameras, { resolution: 104, heightMeters: 0.168, targetTriangles: 15000, views: window.cameraModels(s.viewMetas), subject: s.subject });
+  // the same splat meshed the old way, cropped by the camera ring
+  const ringMesh = M.buildScanMesh(s.splat, s.cameras, { resolution: 104, heightMeters: 0.168, targetTriangles: 15000, views: window.cameraModels(s.viewMetas) });
+  return {
+    sizeCm: mesh.stats.sizeMeters.map((v) => +(v * 100).toFixed(1)),
+    shape: window.shapeError(mesh),
+    ringCrop: { sizeCm: ringMesh.stats.sizeMeters.map((v) => +(v * 100).toFixed(1)), shape: window.shapeError(ringMesh) },
+    placed: s.session.recon.cams.length,
+    timings: document.querySelector('#scan-timings').textContent,
+  };
+};
+
+// A real capture from "Download photos", unzipped into .scans/<name>/ (git-ignored):
+//   await loadCapture('/Users/.../spatial-drop/.scans/ghost-can');   // fills the photo list
+//   document.querySelector('#scan-build-button').click();
+window.loadCapture = async (dir, { build = false } = {}) => {
+  const capture = await (await fetch(`/@fs${dir}/capture.json`)).json();
+  const files = [];
+  for (const { name } of capture.photos) {
+    const blob = await (await fetch(`/@fs${dir}/${name}`)).blob();
+    files.push(new File([blob], name, { type: 'image/jpeg' }));
+  }
+  window.__orbitFiles = files;
+  window.__capture = capture;
+  document.querySelector('#scan-clear-button').click();
+  const dt = new DataTransfer(); files.forEach((f) => dt.items.add(f));
+  const input = document.querySelector('#scan-file-input'); input.files = dt.files; input.dispatchEvent(new Event('change'));
+  window.__t0 = performance.now();
+  if (build) document.querySelector('#scan-build-button').click();
+  return { photos: files.length, steps: capture.photos.reduce((n, p) => ({ ...n, [p.step ?? 'upload']: (n[p.step ?? 'upload'] ?? 0) + 1 }), {}) };
 };
