@@ -81,6 +81,8 @@ export interface ScanMesh {
     voxels: Vec3;
     triangles: number;
     sizeMeters: Vec3;
+    /** the simple shape that replaced the scanned surface, if one did (scan-shapes.ts) */
+    shape?: "revolve" | "box";
   };
 }
 
@@ -705,7 +707,7 @@ function smooth(positions: Float32Array, indices: Uint32Array, iterations: numbe
   }
 }
 
-function computeNormals(positions: Float32Array, indices: Uint32Array) {
+export function computeNormals(positions: Float32Array, indices: Uint32Array) {
   const normals = new Float32Array(positions.length);
   for (let t = 0; t < indices.length; t += 3) {
     const a = indices[t] * 3, b = indices[t + 1] * 3, c = indices[t + 2] * 3;

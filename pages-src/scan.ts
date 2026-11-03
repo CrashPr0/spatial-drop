@@ -46,6 +46,8 @@ const STAGE_SPANS: Record<string, [number, number]> = {
 
 // triangle budgets per detail level; texture detail is baked separately
 const DETAIL_TRIANGLES: Record<string, number> = { light: 6000, standard: 15000, high: 40000 };
+// what the stats line says when a simple shape replaced the scanned surface
+const SHAPE_NOTES: Record<string, string> = { revolve: " · cleaned up as a round shape", box: " · cleaned up as a box" };
 
 type MeshResult = Extract<MeshWorkerMessage, { type: "done" }>;
 
@@ -185,6 +187,7 @@ export function setupScanLab() {
   const cropInput = $<HTMLInputElement>("#scan-crop");
   const densityInput = $<HTMLInputElement>("#scan-density");
   const detailInput = $<HTMLSelectElement>("#scan-detail-level");
+  const shapeInput = $<HTMLSelectElement>("#scan-shape");
   const rebuildButton = $<HTMLButtonElement>("#scan-rebuild-button");
   const viewer = $<HTMLElement & { src: string }>("#scan-viewer");
   const meshStats = $("#scan-mesh-stats");
@@ -791,8 +794,10 @@ export function setupScanLab() {
           resolution: 104,
           targetTriangles: DETAIL_TRIANGLES[detailInput.value] ?? DETAIL_TRIANGLES.standard,
         },
+        shapes: shapeInput.value === "scanned" ? "scanned" : "auto",
         textureSize: 1024,
       }, (progress) => {
+        if (progress.stage === "shape") setProgress("Building the AR mesh", 98.2, "Checking whether it is a can, a bottle or a box…");
         if (progress.stage === "texture") {
           const { done, total } = progress;
           setProgress("Painting the texture", 98.5 + done / total, `Projecting photo ${Math.min(done + 1, total)} of ${total} onto the surface…`);
@@ -811,7 +816,7 @@ export function setupScanLab() {
       viewer.setAttribute("ios-src", usdzUrl);
       viewer.setAttribute("src", glbUrl);
       const [w, h, d] = mesh.stats.sizeMeters.map((value) => Math.round(value * 100));
-      meshStats.textContent = `${mesh.stats.triangles.toLocaleString()} triangles · ${w} × ${h} × ${d} cm · GLB ${formatBytes(glbBlob.size)} · USDZ ${formatBytes(usdzBlob.size)}${mesh.stats.groundRemoved ? " · ground removed" : ""}`;
+      meshStats.textContent = `${mesh.stats.triangles.toLocaleString()} triangles · ${w} × ${h} × ${d} cm · GLB ${formatBytes(glbBlob.size)} · USDZ ${formatBytes(usdzBlob.size)}${mesh.stats.groundRemoved ? " · ground removed" : ""}${SHAPE_NOTES[mesh.stats.shape ?? ""] ?? ""}`;
       const modelTime = performance.now() - phases.modelStart;
       timingsLine.textContent = phases.trained
         ? `Solved in ${seconds(phases.solved - startedAt)} · ${phases.noGpu ? "no WebGPU, so not trained" : `trained in ${seconds(phases.trained - phases.trainStart)}`} · model in ${seconds(modelTime)} · ${seconds(performance.now() - startedAt)} total on this device`

@@ -5,10 +5,14 @@
 /// <reference lib="webworker" />
 
 import { bakeTextureAtlas, buildScanMesh, type MeshOptions, type ScanCamera, type SplatCloud } from "./scan-mesh";
+import { chooseShape, mightBeShape, snapToShape } from "./scan-shapes";
+import { measureShine } from "./scan-shine";
 import { projectPhotos, type PhotoView } from "./scan-texture";
 
 // photos are decoded at most this large for texturing
 const TEXTURE_PHOTO_MAX = 1600;
+// and this large for judging the surface's shine (1.9 s for 57 photos on a laptop)
+const SHINE_PHOTO_MAX = 800;
 
 /** Camera data the texture projector needs, without the photo itself. */
 export interface ViewMeta {
@@ -31,23 +35,25 @@ export interface MeshJob {
   viewMetas: ViewMeta[];
   photos: File[];
   options: Omit<MeshOptions, "views">;
+  /** "auto": a scan that is a can, a bottle or a box becomes that clean shape */
+  shapes: "auto" | "scanned";
   textureSize: number;
 }
 
 export type MeshWorkerMessage =
-  | { type: "progress"; stage: "mesh" | "texture"; done: number; total: number }
+  | { type: "progress"; stage: "mesh" | "shape" | "texture"; done: number; total: number }
   | {
     type: "done";
     mesh: { positions: Float32Array; normals: Float32Array; indices: Uint32Array; stats: ReturnType<typeof buildScanMesh>["stats"] };
     atlas: Omit<ReturnType<typeof bakeTextureAtlas>, "texelPoints" | "texelNormals" | "texelUsed">;
     /** milliseconds per step, for profiling */
-    timings: { mesh: number; atlas: number; photos: number };
+    timings: { mesh: number; shape: number; atlas: number; photos: number };
   }
   | { type: "error"; message: string };
 
-async function decodePhoto(file: Blob) {
+async function decodePhoto(file: Blob, largest = TEXTURE_PHOTO_MAX) {
   const bitmap = await createImageBitmap(file);
-  const scale = Math.min(1, TEXTURE_PHOTO_MAX / Math.max(bitmap.width, bitmap.height));
+  const scale = Math.min(1, largest / Math.max(bitmap.width, bitmap.height));
   const width = Math.round(bitmap.width * scale), height = Math.round(bitmap.height * scale);
   const canvas = new OffscreenCanvas(width, height);
   const context = canvas.getContext("2d", { willReadFrequently: true })!;
@@ -57,12 +63,12 @@ async function decodePhoto(file: Blob) {
 }
 
 /** Pair each solved camera with its photo by file name (frames that failed to decode are skipped). */
-function photoViews(metas: ViewMeta[], files: File[]): PhotoView[] {
+function photoViews(metas: ViewMeta[], files: File[], largest?: number): PhotoView[] {
   const byName = new Map<string, File[]>();
   for (const file of files) byName.set(file.name, [...(byName.get(file.name) ?? []), file]);
   return metas.flatMap((meta) => {
     const file = byName.get(meta.name)?.shift();
-    return file ? [{ ...meta, load: () => decodePhoto(file) }] : [];
+    return file ? [{ ...meta, load: () => decodePhoto(file, largest) }] : [];
   });
 }
 
@@ -72,7 +78,7 @@ self.onmessage = async ({ data: job }: MessageEvent<MeshJob>) => {
   try {
     const started = performance.now();
     post({ type: "progress", stage: "mesh", done: 0, total: 1 });
-    const mesh = buildScanMesh(job.splat, job.cameras, {
+    let mesh = buildScanMesh(job.splat, job.cameras, {
       ...job.options,
       // carve from what the cameras saw, so a gappy splat shell cannot cave the model in
       views: job.viewMetas.map((meta) => ({
@@ -82,6 +88,18 @@ self.onmessage = async ({ data: job }: MessageEvent<MeshJob>) => {
       })),
     });
     const meshed = performance.now();
+    if (job.shapes === "auto") {
+      // only read the photos for shine when a shape could fit at all
+      const sample = { positions: mesh.positions, normals: mesh.normals, bottom: 0 };
+      const views = mightBeShape(sample) ? photoViews(job.viewMetas, job.photos, SHINE_PHOTO_MAX) : [];
+      if (views.length) {
+        post({ type: "progress", stage: "shape", done: 0, total: 1 });
+        const { shine } = await measureShine(mesh, views);
+        const fit = Number.isFinite(shine) ? chooseShape(sample, shine) : null;
+        if (fit) mesh = snapToShape(mesh, fit, job.options.targetTriangles);
+      }
+    }
+    const shaped = performance.now();
     const atlas = bakeTextureAtlas(mesh, { size: job.textureSize });
     const baked = performance.now();
     const views = photoViews(job.viewMetas, job.photos);
@@ -96,7 +114,7 @@ self.onmessage = async ({ data: job }: MessageEvent<MeshJob>) => {
     post(
       {
         type: "done", mesh: { positions: mesh.positions, normals: mesh.normals, indices: mesh.indices, stats: mesh.stats }, atlas: painted,
-        timings: { mesh: Math.round(meshed - started), atlas: Math.round(baked - meshed), photos: Math.round(performance.now() - baked) },
+        timings: { mesh: Math.round(meshed - started), shape: Math.round(shaped - meshed), atlas: Math.round(baked - shaped), photos: Math.round(performance.now() - baked) },
       },
       [mesh.positions.buffer, mesh.normals.buffer, mesh.indices.buffer, painted.pixels.buffer, painted.indices.buffer,
         painted.positions.buffer, painted.normals.buffer, painted.uvs.buffer],
