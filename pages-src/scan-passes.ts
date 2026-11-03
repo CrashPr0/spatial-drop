@@ -31,15 +31,15 @@ export interface ScanPass {
 
 export const PASSES: ScanPass[] = [
   {
-    id: "low", title: "Around", minElevation: -25, maxElevation: 25, budget: 30, goal: "ring",
+    id: "low", title: "Around", minElevation: -25, maxElevation: 25, budget: 24, goal: "ring",
     how: "Hold the phone level with the middle of the object and walk all the way around it.",
   },
   {
-    id: "high", title: "From above", minElevation: -65, maxElevation: -25, budget: 28, goal: "ring",
+    id: "high", title: "From above", minElevation: -65, maxElevation: -25, budget: 22, goal: "ring",
     how: "Raise the phone above the object, tilt it down at the object, and walk around it again.",
   },
   {
-    id: "top", title: "Over the top", minElevation: -90, maxElevation: -45, budget: 8, goal: "count", count: 5, continues: true,
+    id: "top", title: "Over the top", minElevation: -90, maxElevation: -45, budget: 4, goal: "count", count: 4, continues: true,
     how: "From where you are, move the phone up and over the object, tilting it down, and hold still at each stop.",
   },
 ];

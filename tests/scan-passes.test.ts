@@ -9,7 +9,7 @@ test("the steps go around, then from above, then over the top", () => {
   // every step's band sits lower than the one before
   for (let i = 1; i < PASSES.length; i++) assert.ok(PASSES[i].maxElevation <= PASSES[i - 1].maxElevation);
   // the budgets fit the photo limit
-  assert.ok(PASSES.reduce((sum, pass) => sum + pass.budget, 0) <= 72);
+  assert.ok(PASSES.reduce((sum, pass) => sum + pass.budget, 0) <= 50);
 });
 
 test("tilt advice: level for the first loop, pointed down for the second", () => {
@@ -31,6 +31,6 @@ test("a loop is done when the ring is covered or the step's photos run out", () 
   assert.equal(passDone(low, 0.5, 10), false);
   assert.equal(passDone(low, RING_DONE, 20), true);
   assert.equal(passDone(low, 0.4, low.budget), true);
-  assert.equal(passProgress(top, 0, 2), 2 / 5);
-  assert.equal(passDone(top, 0, 5), true);
+  assert.equal(passProgress(top, 0, 2), 2 / 4);
+  assert.equal(passDone(top, 0, 4), true);
 });

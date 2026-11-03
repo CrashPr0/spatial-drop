@@ -19,12 +19,12 @@ const MAX_PHOTOS = 72;
 const MIN_PHOTOS = 12;
 // seconds to get into position after pressing start
 const COUNTDOWN_SECONDS = 3;
-// how long the view must stay still before a photo is kept
-const HOLD_MS = 450;
+// Motion is checked against the previous probe; no additional hold is needed.
+const CAPTURE_INTERVAL_MS = 250;
 // after this long without a photo, keep the next steady frame even if the match looks lost
 const STUCK_MS = 4000;
 // how long the "next step" banner holds capture between steps
-const STEP_BANNER_MS = 2500;
+const STEP_BANNER_MS = 1000;
 // 35 mm-equivalent focal of a typical phone main camera (iPhone and Pixel wide lenses: 24–26 mm)
 const PHONE_MAIN_LENS_MM = 26;
 const STAGE_LABELS: Record<string, string> = {
@@ -355,7 +355,6 @@ export function setupScanLab() {
     let lastKept: Float32Array | null = null;
     let lastKeptAt = 0;
     let previousFrame: Float32Array | null = null;
-    let holdingSince = 0;
     let heading: Heading = 0;
     const recentSharpness: number[] = [];
     let saving = false;
@@ -453,7 +452,6 @@ export function setupScanLab() {
       const sourceWidth = feed?.width ?? video.videoWidth, sourceHeight = feed?.height ?? video.videoHeight;
       if (document.hidden) {
         previousFrame = null;
-        holdingSince = 0;
         return;
       }
       if (saving || !sourceWidth || !sourceHeight || photos.length >= MAX_PHOTOS) return;
@@ -487,7 +485,6 @@ export function setupScanLab() {
       // taken at table height would just repeat the first loop
       const tilt = tiltAdvice(pass(), pose.elevation());
       if (tilt === "raise" || tilt === "lower") {
-        holdingSince = 0;
         paintRing();
         ghost.hidden = true;
         const text = tilt === "raise"
@@ -513,24 +510,19 @@ export function setupScanLab() {
       // gaps than this guide does, and one more photo beats a stalled scan
       const stuck = advice === "lost" && now - lastKeptAt > STUCK_MS;
       if (advice === "move") {
-        holdingSince = 0;
         const wrongWay = heading && match && match.dx * small.width * heading <= -2;
         if (pass().goal !== "ring") return showGuide("move", `Move up and over the top · ${matched}`, 0, direction);
         return showGuide("move", wrongWay ? "Other way · you've been here" : heading ? `Keep circling · ${matched}` : "Circle the object either way", 0, direction);
       }
       if (advice === "lost" && !stuck) {
-        holdingSince = 0;
         return showGuide("lost", "Too far · go back until it lines up", 0, direction);
       }
       const holdText = advice === "first" ? "Hold still for the first photo" : stuck ? "Hold still · keeping one to stay on track" : `Hold still · ${matched}`;
       if (!steady) {
-        holdingSince = 0;
         return showGuide("hold", holdText);
       }
-      holdingSince ||= now;
-      const fill = Math.min(1, (now - holdingSince) / HOLD_MS);
-      showGuide("hold", holdText, fill);
-      if (fill < 1 || now - lastKeptAt < 350) return;
+      showGuide("hold", holdText, 1);
+      if (now - lastKeptAt < CAPTURE_INTERVAL_MS) return;
       // the way the view travelled to this photo is the way the orbit goes
       if (match && Math.abs(match.dx * small.width) >= 2) heading = match.dx > 0 ? 1 : -1;
       const before = coverage.last;
@@ -546,18 +538,19 @@ export function setupScanLab() {
       paintRing();
       lastKept = small.gray;
       lastKeptAt = now;
-      holdingSince = 0;
       saving = true;
       const frame = document.createElement("canvas");
       frame.width = sourceWidth;
       frame.height = sourceHeight;
       frame.getContext("2d")!.drawImage(source, 0, 0);
+      // A frame is captured now; JPEG encoding should not delay the feedback.
+      viewport.classList.remove("flash");
+      void viewport.offsetWidth;
+      viewport.classList.add("flash");
       frame.toBlob((blob) => {
+        frame.width = frame.height = 0;
         saving = false;
         if (!blob || !stream || generation !== cameraGeneration) return;
-        viewport.classList.remove("flash");
-        void viewport.offsetWidth;
-        viewport.classList.add("flash");
         if (ghost.src) URL.revokeObjectURL(ghost.src);
         ghost.src = URL.createObjectURL(blob);
         const file = new File([blob], `capture_${String(photos.length).padStart(3, "0")}.jpg`, { type: "image/jpeg" });
