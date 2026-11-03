@@ -296,6 +296,7 @@ export function AppleScanPreview() {
           <div
             className={`scan-drop-zone ${dragging ? "is-dragging" : ""} ${sourceFile ? "has-file" : ""}`}
             role="button"
+            aria-label="Choose an Apple scan (.usdz or .glb)"
             tabIndex={0}
             onClick={() => inputRef.current?.click()}
             onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") inputRef.current?.click(); }}
@@ -303,7 +304,7 @@ export function AppleScanPreview() {
             onDragLeave={() => setDragging(false)}
             onDrop={onDrop}
           >
-            <input ref={inputRef} className="visually-hidden" type="file" accept=".usdz,.glb,model/vnd.usdz+zip,model/gltf-binary" onChange={(event: ChangeEvent<HTMLInputElement>) => void processFile(event.target.files?.[0])} />
+            <input ref={inputRef} className="visually-hidden" type="file" aria-label="Choose an Apple scan (.usdz or .glb)" accept=".usdz,.glb,model/vnd.usdz+zip,model/gltf-binary" onChange={(event: ChangeEvent<HTMLInputElement>) => void processFile(event.target.files?.[0])} />
             <span className="scan-file-mark" aria-hidden="true">USDZ</span>
             <div><strong>{sourceFile?.name || "Drop an Object Capture model"}</strong><span>{sourceFile ? `${formatBytes(sourceFile.size)} · ${processing}` : "or click to choose .usdz / .glb"}</span></div>
           </div>

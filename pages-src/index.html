@@ -36,8 +36,8 @@
         <div class="controls">
           <div class="step"><em>01</em><div><h2>Choose a model</h2><p>Binary glTF · 15 MB maximum · processed locally</p></div></div>
 
-          <div id="drop-zone" class="drop-zone" role="button" tabindex="0">
-            <input id="file-input" type="file" accept=".glb,model/gltf-binary" hidden />
+          <div id="drop-zone" class="drop-zone" role="button" tabindex="0" aria-label="Choose a GLB model for Studio">
+            <input id="file-input" type="file" aria-label="Choose a GLB model for Studio" accept=".glb,model/gltf-binary" hidden />
             <span class="upload-mark">↗</span>
             <div><strong id="drop-title">Drop a GLB here</strong><small id="drop-detail">or click to choose a file</small></div>
           </div>
@@ -124,8 +124,8 @@
               <button id="scan-stop-button" class="secondary-button" type="button" hidden>Stop capture</button>
               <button id="scan-next-step" class="text-button scan-next-step" type="button" hidden>Skip this step</button>
             </div>
-            <div id="scan-drop-zone" class="drop-zone scan-drop-zone" role="button" tabindex="0">
-              <input id="scan-file-input" type="file" accept="image/*,video/*" multiple hidden />
+            <div id="scan-drop-zone" class="drop-zone scan-drop-zone" role="button" tabindex="0" aria-label="Choose photos or one video for scanning">
+              <input id="scan-file-input" type="file" aria-label="Choose photos or one video for scanning" accept="image/*,video/*" multiple hidden />
               <span class="upload-mark">↗</span>
               <div><strong>Or choose photos or one video</strong><small>JPEG, PNG or HEIC photos · MP4 or MOV orbit clip</small></div>
             </div>
@@ -211,8 +211,8 @@
               </div>
               <p id="beam-transport-note">Reliable fallback: compressed Base32 frames plus fountain recovery. No exact missed frame is required.</p>
             </fieldset>
-            <div id="beam-drop-zone" class="drop-zone beam-drop-zone" role="button" tabindex="0">
-              <input id="beam-file-input" type="file" accept=".glb,model/gltf-binary" hidden />
+            <div id="beam-drop-zone" class="drop-zone beam-drop-zone" role="button" tabindex="0" aria-label="Choose a GLB model for QR Beam">
+              <input id="beam-file-input" type="file" aria-label="Choose a GLB model for QR Beam" accept=".glb,model/gltf-binary" hidden />
               <span class="upload-mark">↗</span>
               <div><strong id="beam-file-title">Drop a compact GLB here</strong><small id="beam-file-detail">or click to choose a model</small></div>
             </div>
