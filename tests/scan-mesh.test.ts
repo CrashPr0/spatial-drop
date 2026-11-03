@@ -311,6 +311,28 @@ test("the object region finds the can, not its neighbors on the table", () => {
   assert.ok(region.top < local([0, 0.21, 0])[1], `top ${region.top}`);
 });
 
+test("the object region stands on the table even when the table is tilted and its edge drops away", () => {
+  // a real scan (a can on a kitchen counter's corner): the cameras' mean up
+  // was 5.5° off the counter's, and the counter's front face fell away below
+  // it. The lowest points were then on that face, the whole counter counted
+  // as standing on them, and the region took in the counter (14.7 cm wide).
+  const { can, other } = canScene(6000);
+  const tilt = 6 * Math.PI / 180;
+  const tilted = (p: Vec3): Vec3 => [p[0], p[1] * Math.cos(tilt) - p[2] * Math.sin(tilt), p[1] * Math.sin(tilt) + p[2] * Math.cos(tilt)];
+  let seed = 3;
+  const random = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const edge: Vec3[] = Array.from({ length: 400 }, () => [(random() - 0.5) * 0.8, -random() * 0.3, 0.12]);
+  const region = subjectCylinder([...can, ...other, ...edge].map(tilted), canCameras());
+  const local = (p: Vec3) => [0, 1, 2].map((r) => region.rotation[r * 3] * (p[0] - region.center[0]) + region.rotation[r * 3 + 1] * (p[1] - region.center[1]) + region.rotation[r * 3 + 2] * (p[2] - region.center[2]));
+  assert.ok(region.radius > CAN_R && region.radius < 0.075, `radius ${region.radius}`);
+  for (const p of can) {
+    const [x, y, z] = local(tilted(p));
+    assert.ok(Math.hypot(x, z) < region.radius && y > region.bottom && y < region.top, "every can point is inside");
+  }
+  // the region is level with the table: its bottom sits just under the can's base
+  assert.ok(local(tilted([0, 0, 0]))[1] - region.bottom < 0.02, `bottom ${region.bottom}`);
+});
+
 test("the mesh keeps to the object, and loose pieces off its center are dropped", () => {
   const { can, other } = canScene(400000, 9);
   const cloud = cloudOf([...can, ...other]);

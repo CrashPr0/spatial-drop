@@ -309,15 +309,29 @@ export function objectCluster(points: Vec3[], ring: number, { cellFraction = 0.0
 /** A conservative vertical cylinder around the scanned object, from the solver's
  *  sparse points, before any training: the region worth training at all. */
 export function subjectCylinder(points: Vec3[], cameras: ScanCamera[], options: { crop?: number; pad?: number } = {}): SubjectRegion {
-  const { center, basis, reach, ring } = orbitFrame(cameras, () => [0, 1, 2].map((k) => median(points.map((p) => p[k]))) as Vec3);
+  const { center, basis: orbitBasis, reach, ring } = orbitFrame(cameras, () => [0, 1, 2].map((k) => median(points.map((p) => p[k]))) as Vec3);
   const radius = (options.crop ?? DEFAULT_CROP) * ring;
-  const inside = points.map((p) => apply(basis, sub(p, center)))
+  let basis = orbitBasis;
+  let inside = points.map((p) => apply(basis, sub(p, center)))
     .filter((p) => Math.hypot(p[0], p[2]) <= radius && Math.abs(p[1]) <= reach);
   const generous = { center, rotation: basis, radius, bottom: -reach, top: reach };
   if (inside.length < 40) return generous;
-  // the lowest band is the table under the object; what stands above it is the object
-  const heights = inside.map((p) => p[1]).sort((a, b) => a - b);
-  const floor = heights[Math.floor(0.02 * (heights.length - 1))];
+  // the table under the object is the plane most points lie on; what stands
+  // above it is the object. The cameras' mean up is only roughly the table's
+  // (5.5° off on a real scan of a can on a counter), and the lowest points
+  // can be anywhere below it, such as the counter's edge falling away: level
+  // the region on the plane and measure heights from it
+  let floor: number;
+  const ground = findGround(inside, 0.04 * radius);
+  if (ground) {
+    const level = rotationBetween(ground.normal, [0, 1, 0]);
+    basis = [0, 1, 2].flatMap((r) => [0, 1, 2].map((c) => level[r * 3] * orbitBasis[c] + level[r * 3 + 1] * orbitBasis[3 + c] + level[r * 3 + 2] * orbitBasis[6 + c]));
+    inside = inside.map((p) => apply(level, p));
+    floor = ground.offset;
+  } else {
+    const heights = inside.map((p) => p[1]).sort((a, b) => a - b);
+    floor = heights[Math.floor(0.02 * (heights.length - 1))];
+  }
   const standing = inside.filter((p) => p[1] > floor + 0.1 * radius);
   // the object is the cluster under the axis, not everything inside the ring
   const object = objectCluster(standing, ring);
