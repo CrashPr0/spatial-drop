@@ -722,6 +722,7 @@ export function setupScanLab() {
     }
     const mark = (label: string) => devLog?.push([Math.round(performance.now() - startedAt), `[scan] ${label}`]);
     created.on("stage", (event: { stage: string; done: number; total: number }) => {
+      if (session !== created) return;
       const span = STAGE_SPANS[event.stage];
       if (!span || event.stage === "train") return;
       const fraction = event.total ? event.done / event.total : 0;
@@ -730,6 +731,7 @@ export function setupScanLab() {
       if (event.stage === "register") metricCameras.textContent = `${event.done} / ${event.total}`;
     });
     created.on("metrics", (metrics: { iter: number; splats: number; itersPerSec: number }) => {
+      if (session !== created) return;
       const fraction = metrics.iter / maxIters;
       // early steps run on few splats and are fast: only estimate once growth has settled
       const remaining = metrics.itersPerSec > 0 && fraction > 0.15 ? Math.max(0, (maxIters - metrics.iter) / metrics.itersPerSec) : 0;
@@ -738,10 +740,18 @@ export function setupScanLab() {
       metricSplats.textContent = metrics.splats.toLocaleString();
     });
     created.on("event", (event: { kind: string }) => {
+      if (session !== created) return;
       if (event.kind === "train-complete") void afterTraining();
       if (event.kind === "device-lost") {
+        // Invalidate before disposal: outstanding GPU work may still settle
+        // and must not re-enter training or disable the retry button.
+        session = null;
         stopClock();
+        meshJob?.abort();
+        liveCanvas.hidden = true;
         setState("idle");
+        setProgress("GPU interrupted", 0, "Photos retained. Press Build 3D model to retry.");
+        try { created.dispose(); } catch { /* the device is already gone */ }
         setError("The browser released the GPU. This can happen under memory pressure or when the tab is backgrounded. Your photos are still here; keep this tab visible and build again.");
       }
     });
@@ -750,6 +760,7 @@ export function setupScanLab() {
       setProgress(STAGE_LABELS.decode, 0, `Processing ${photos.length} photos. Nothing leaves this device.`);
       scannedPhotos = photos.slice();
       await created.load(scannedPhotos);
+      if (session !== created) return;
       // Only live captures have this cache; use exact dimensions and default
       // feature settings so imported photos and custom solver settings stay safe.
       const byName = new Map(scannedPhotos.map((file) => [file.name, preparedFeatures.get(file)]));
@@ -764,6 +775,7 @@ export function setupScanLab() {
       await created.solve(tagged >= 0.6 * frames.length ? {} : {
         focalPrior: focalPxFrom35(PHONE_MAIN_LENS_MM, frames[0].fw, frames[0].fh),
       });
+      if (session !== created) return;
       // Descriptor copies are no longer useful once the camera solve finishes.
       byName.clear();
       for (const file of scannedPhotos) preparedFeatures.delete(file);
@@ -818,6 +830,7 @@ export function setupScanLab() {
       phases.trainStart = performance.now();
       created.start();
     } catch (reason) {
+      if (session !== created) return;
       stopClock();
       created.dispose();
       if (session === created) session = null;
@@ -836,13 +849,15 @@ export function setupScanLab() {
     setProgress("Saving the splat", 97, "Reading the trained splat back from the GPU…");
     try {
       const raw = await current.exportRawState();
+      if (session !== current) return;
       current.pause();
       await finishModel(current, { data: Float32Array.from(raw.data.subarray(0, raw.n * 16)), n: raw.n, dc: current.trainer.dcMode });
     } catch (reason) {
+      if (session !== current) return;
       setState("idle");
       setError(reason instanceof Error ? reason.message : "The trained splat could not be read.");
     } finally {
-      stopClock();
+      if (session === current) stopClock();
     }
   }
 
@@ -864,7 +879,7 @@ export function setupScanLab() {
       if (import.meta.env.DEV) Object.assign(window, { spatialDropScan: { splat, cameras, viewMetas, session: current, subject: subjectRegion } });
       await makeMesh();
     } finally {
-      stopClock();
+      if (session === current) stopClock();
     }
   }
 
