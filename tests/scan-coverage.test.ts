@@ -66,13 +66,25 @@ test("the arrow heads for the nearest open segment, ties going the way you are t
   assert.equal(nearestGap(coverage, 60)?.direction, "cw");
 });
 
+test("the arrow keeps the travel direction past a half-filled segment's middle", () => {
+  const coverage = createCoverage();
+  for (let at = 0; at <= 50; at += 10) addPhotoToCoverage(coverage, at, 0.3);
+  // at 62°, segment 2 (centred on 60°, 45–75°) is under its fill mark and its
+  // middle is just behind: a nearest pick would point back, then forward again
+  assert.ok(segmentFill(coverage)[2] < SCANNED_FILL);
+  assert.equal(nearestGap(coverage, 62, "cw")?.direction, "cw");
+  assert.equal(nearestGap(coverage, 58, "cw")?.direction, "cw");
+  // walking the other way, it keeps pointing that way
+  assert.equal(nearestGap(coverage, 62, "ccw")?.direction, "ccw");
+});
+
 test("tracking follows the sensor heading relative to where the scan began", () => {
   const pose = new PoseTracker();
   assert.equal(pose.angle(), null);
   pose.sense({ alpha: 40, beta: 90, gamma: 0 });
   pose.anchor();
   pose.sense({ alpha: 10, beta: 90, gamma: 0 });
-  // walking right: the camera turns left, alpha falls, the heading rises
+  // walking left round the object: the camera turns right, alpha falls, the heading rises
   assert.equal(Math.round(pose.angle()!), 30);
   pose.sense({ alpha: 70, beta: 90, gamma: 0 });
   assert.equal(Math.round(pose.angle()!), 330);
