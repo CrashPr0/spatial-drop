@@ -96,7 +96,7 @@ export function matchFrames(previous: Float32Array, current: Float32Array, width
  * enough new view to add something, enough shared view for the solve to
  * link the photo to the one before.
  */
-export function adviseCapture(match: FrameMatch | null, { keepBelow = 0.35, lostBelow = 0.1 } = {}): CaptureAdvice {
+export function adviseCapture(match: FrameMatch | null, { keepBelow = 0.6, lostBelow = 0.1 } = {}): CaptureAdvice {
   if (!match) return "first";
   if (match.overlap < lostBelow) return "lost";
   return match.overlap < keepBelow ? "hold" : "move";
@@ -118,4 +118,15 @@ export function pointTo(advice: CaptureAdvice, match: FrameMatch | null, heading
   // the tiles still found have slid one way: go back the other
   if (match && Math.abs(match.dx * width) >= 2) return side(-match.dx);
   return heading ? side(-heading) : null;
+}
+
+
+/** Sensor heading is supplementary: it must never override lost visual overlap. */
+export function adviseOrbit(match: FrameMatch | null, angle: number | null, last: number | null): CaptureAdvice {
+  const visual = adviseCapture(match);
+  if (!match || angle === null || last === null) return visual;
+  const gap = Math.abs(((angle - last + 540) % 360) - 180);
+  if (gap > 24) return "lost";
+  if (gap >= 10 && visual === "move") return "hold";
+  return visual;
 }

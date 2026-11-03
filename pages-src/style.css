@@ -500,3 +500,7 @@ footer a { color: inherit; text-underline-offset: 3px; }
   html { scroll-behavior: auto; }
   *, *::before, *::after { transition: none !important; }
 }
+
+.scan-framing { display: none; position: absolute; z-index: 3; left: 30%; top: 17%; width: 40%; height: 60%; border: 2px dashed rgba(255,255,255,.75); border-radius: 20%; pointer-events: none; }
+.camera-active .scan-framing { display: block; }
+.scan-framing span { position: absolute; top: 100%; left: -25%; width: 150%; text-align: center; color: white; background: rgba(9,31,56,.8); font: 11px/1.4 monospace; }

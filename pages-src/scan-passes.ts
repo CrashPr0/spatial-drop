@@ -71,3 +71,8 @@ export function passProgress(pass: ScanPass, coverage: number, photos: number) {
 // orbit. Keep the count fallback for devices without usable sensors.
 export const passDone = (pass: ScanPass, coverage: number, photos: number, tracked = false) =>
   passProgress(pass, coverage, photos) >= 1 || ((!tracked || pass.goal !== "ring") && photos >= pass.budget);
+
+
+/** Conservative acceptance gate; photo count alone does not establish coverage. */
+export const hasEnoughSolvedViews = (placed: number, total: number) =>
+  total >= 12 && placed >= Math.max(12, Math.ceil(total * 0.7));

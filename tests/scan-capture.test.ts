@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { adviseCapture, matchFrames, pointTo, shrink, type FrameMatch } from "../pages-src/scan-capture";
+import { adviseOrbit, adviseCapture, matchFrames, pointTo, shrink, type FrameMatch } from "../pages-src/scan-capture";
 
 // a smooth random texture, wider than the frame so it can be panned
 function scene(width: number, height: number, seed = 7) {
@@ -67,4 +67,22 @@ test("shrink averages blocks", () => {
   assert.deepEqual([...small.gray], [1, 5]);
   assert.equal(small.width, 2);
   assert.equal(small.height, 1);
+});
+
+
+test("capture requests a photo before most textured tiles are lost", () => {
+  assert.equal(adviseCapture(match(0.55)), "hold");
+  assert.equal(adviseCapture(match(0.4)), "hold");
+  assert.equal(adviseCapture(match(0.7)), "move");
+  assert.equal(adviseCapture(match(0.05)), "lost");
+});
+
+
+test("orbit guidance requests small steps and blocks large gaps", () => {
+  assert.equal(adviseOrbit(match(0.9), 12, 0), "hold");
+  assert.equal(adviseOrbit(match(0.9), 2, 350), "hold");
+  assert.equal(adviseOrbit(match(0.9), 67, 0), "lost");
+  assert.equal(adviseOrbit(match(0.05), 12, 0), "lost");
+  assert.equal(adviseOrbit(match(0.9), null, 0), "move");
+  assert.equal(adviseOrbit(null, 40, 0), "first");
 });

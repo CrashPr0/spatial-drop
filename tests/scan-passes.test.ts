@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { PASSES, passDone, passProgress, RING_DONE, tiltAdvice } from "../pages-src/scan-passes";
+import { PASSES, passDone, passProgress, RING_DONE, tiltAdvice, hasEnoughSolvedViews } from "../pages-src/scan-passes";
 
 const [low, high, top] = PASSES;
 
@@ -42,4 +42,14 @@ test("tracked orbits cannot finish with missing coverage just by reaching a phot
     assert.equal(passDone(pass, RING_DONE, pass.budget, true), true);
     assert.equal(passDone(pass, 0.6, pass.budget, false), true);
   }
+});
+
+
+test("incomplete camera solves are rejected before training", () => {
+  assert.equal(hasEnoughSolvedViews(15, 37), false);
+  assert.equal(hasEnoughSolvedViews(25, 37), false);
+  assert.equal(hasEnoughSolvedViews(26, 37), true);
+  assert.equal(hasEnoughSolvedViews(8, 12), false);
+  assert.equal(hasEnoughSolvedViews(12, 12), true);
+  assert.equal(hasEnoughSolvedViews(0, 0), false);
 });

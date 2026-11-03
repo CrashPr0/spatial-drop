@@ -1,9 +1,9 @@
 import { BufferAttribute, BufferGeometry, CanvasTexture, LinearFilter, Mesh, MeshStandardMaterial, SRGBColorSpace } from "three";
 import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
-import { adviseCapture, matchFrames, pointTo, shrink, type Arrow, type Heading } from "./scan-capture";
+import { adviseOrbit, adviseCapture, matchFrames, pointTo, shrink, type Arrow, type Heading } from "./scan-capture";
 import { addPhotoToCoverage, coverageFraction, createCoverage, missingSides, nearestGap, PoseTracker, ringPoint, segmentFill, segmentPath, SEGMENTS, SCANNED_FILL, type Orientation } from "./scan-coverage";
 import { cropToSubject } from "./scan-crop";
-import { PASSES, passDone, passProgress, tiltAdvice } from "./scan-passes";
+import { PASSES, passDone, passProgress, tiltAdvice, hasEnoughSolvedViews } from "./scan-passes";
 import { pointSplats } from "./scan-points";
 import { subjectCylinder, type ScanCamera, type SubjectRegion, type Vec3 } from "./scan-mesh";
 import { buildUsdz } from "./scan-usdz";
@@ -216,6 +216,7 @@ export function setupScanLab() {
   let prepareWorker: Worker | null = null;
   let prepareQueue: File[] = [];
   let preparing: File | null = null;
+  let weakPairUntil = 0;
   const stopPreparing = () => {
     prepareWorker?.terminate();
     prepareWorker = null;
@@ -233,6 +234,11 @@ export function setupScanLab() {
         prepareWorker = new Worker(new URL("./scan-prepare-worker.js", import.meta.url), { type: "module" });
         prepareWorker.onmessage = ({ data }) => {
           if (preparing && data.features) preparedFeatures.set(preparing, data);
+          // Only report the latest actual adjacent pair, not an old backlog or
+          // a skipped frame. Descriptor matches are an early warning, not a pose solve.
+          if (preparing === photos.at(-1) && data.pair?.previous === photos.at(-2)?.name) {
+            weakPairUntil = data.pair.matches < 12 ? performance.now() + 4000 : 0;
+          }
           preparing = null;
           prepareNext();
         };
@@ -301,7 +307,7 @@ export function setupScanLab() {
       ? "Photo limit reached. Build when ready."
       : needed
         ? `${needed} more to start · 30–60 recommended`
-        : photos.length < 30 ? "Enough to try · more angles help" : "Great coverage";
+        : photos.length < 30 ? "Enough to try · more angles help" : "Photos collected · coverage checked during reconstruction";
     captureHint.textContent = coverageNote ? `${base} · ${coverageNote}` : base;
     thumbs.replaceChildren(...photos.slice(-12).map((photo) => {
       const image = document.createElement("img");
@@ -350,6 +356,8 @@ export function setupScanLab() {
 
   async function startCamera() {
     stopCamera();
+    stopPreparing();
+    weakPairUntil = 0;
     const generation = cameraGeneration;
     setError();
     if (!navigator.mediaDevices?.getUserMedia) return setError("This browser cannot open the camera. Choose photos or a video instead.");
@@ -384,8 +392,11 @@ export function setupScanLab() {
     // match each frame against the last kept photo: keep one once the view
     // has moved on but still shares enough with it for the solve to link them
     const probe = document.createElement("canvas");
-    probe.width = 160;
-    probe.height = 120;
+    // Keep portrait captures portrait: stretching them to 4:3 distorts the
+    // tiles used for overlap and motion checks. Bound the analysis workload.
+    const aspect = video.videoWidth / video.videoHeight || 4 / 3;
+    probe.width = aspect >= 1 ? 160 : Math.max(32, Math.round(160 * aspect / 2) * 2);
+    probe.height = aspect >= 1 ? Math.max(32, Math.round(160 / aspect / 2) * 2) : 160;
     const probeContext = probe.getContext("2d", { willReadFrequently: true })!;
     let lastKept: Float32Array | null = null;
     let lastKeptAt = 0;
@@ -511,7 +522,8 @@ export function setupScanLab() {
       const typical = [...recentSharpness].sort((a, b) => a - b)[recentSharpness.length >> 1];
       const small = shrink(gray, probe.width, probe.height, 2);
       const match = lastKept ? matchFrames(lastKept, small.gray, small.width, small.height) : null;
-      const advice = adviseCapture(match);
+      const advice = pass().goal === "ring"
+        ? adviseOrbit(match, pose.angle(), coverage.last) : adviseCapture(match);
       // still: this frame sits within a couple of pixels of the one 120 ms ago
       const jitter = previousFrame ? matchFrames(previousFrame, small.gray, small.width, small.height, { reach: 0.08 }) : null;
       previousFrame = small.gray;
@@ -539,11 +551,14 @@ export function setupScanLab() {
         if (gap) direction = gap.direction === "cw" ? "left" : "right";
       }
       paintRing();
-      const matched = match ? `${Math.round(match.overlap * 100)}% matched` : "";
+      const matched = now < weakPairUntil ? "Weak photo match · move back slightly and take smaller steps"
+        : match ? `${Math.round(match.overlap * 100)}% matched` : "";
       ghost.hidden = advice !== "lost";
       // someone stuck on "lost" still gets photos: the solve matches wider
       // gaps than this guide does, and one more photo beats a stalled scan
-      const stuck = advice === "lost" && now - lastKeptAt > STUCK_MS;
+      const angularGap = pass().goal === "ring" && pose.angle() !== null && coverage.last !== null
+        ? Math.abs(((pose.angle()! - coverage.last + 540) % 360) - 180) : 0;
+      const stuck = advice === "lost" && angularGap <= 24 && now - lastKeptAt > STUCK_MS;
       if (advice === "move") {
         const wrongWay = heading && match && match.dx * small.width * heading <= -2;
         if (pass().goal !== "ring") return showGuide("move", `Move up and over the top · ${matched}`, 0, direction);
@@ -736,8 +751,8 @@ export function setupScanLab() {
       for (const file of scannedPhotos) preparedFeatures.delete(file);
       const placed = created.recon.cams.length;
       metricCameras.textContent = `${placed} / ${photos.length}`;
-      if (placed < Math.max(6, 0.4 * photos.length)) {
-        throw new Error(`Only ${placed} of ${photos.length} photos could be placed. Rescan with more overlap: move slowly around the object.`);
+      if (!hasEnoughSolvedViews(placed, scannedPhotos.length)) {
+        throw new Error(`Only ${placed} of ${photos.length} photos could be placed. Too many views are missing for a reliable model. Keep the object larger in the frame, move in smaller steps, and keep it stationary. Your photos are still available to download.`);
       }
       setProgress(STAGE_LABELS.seed, 48, gpu ? `${placed} cameras solved. Starting the splat trainer…` : `${placed} cameras solved.`);
       // texturing and carving project into the full photos: keep their intrinsics
