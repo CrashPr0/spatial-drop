@@ -15,7 +15,9 @@ type SplatSession = ReturnType<Awaited<ReturnType<typeof loadSplat>>["createSess
 const isVideoFile = (file: File) => /^video\//.test(file.type) || /\.(mp4|mov|m4v|webm|mkv)$/i.test(file.name);
 type ScanState = "idle" | "capturing" | "building" | "training" | "meshing" | "ready";
 
-const MAX_PHOTOS = 72;
+// Two 10-degree orbits need about 72 photos before the top pass or
+// corrective views. Keep headroom while bounding mobile memory and solve work.
+const MAX_PHOTOS = 120;
 const MIN_PHOTOS = 12;
 // seconds to get into position after pressing start
 const COUNTDOWN_SECONDS = 3;
@@ -214,43 +216,35 @@ export function setupScanLab() {
   // Cache descriptors by File identity; removed photos can be garbage collected.
   const preparedFeatures = new WeakMap<File, { fw: number; fh: number; features: object }>();
   let prepareWorker: Worker | null = null;
-  let prepareQueue: File[] = [];
-  let preparing: File | null = null;
+  let pendingCandidate: File | null = null;
+  let finishPreparation: ((value: boolean | null) => void) | null = null;
+  let preparationTimer = 0;
   let weakPairUntil = 0;
   const stopPreparing = () => {
     prepareWorker?.terminate();
     prepareWorker = null;
-    preparing = null;
-    prepareQueue = [];
+    window.clearTimeout(preparationTimer);
+    finishPreparation?.(null);
+    finishPreparation = null;
   };
-  const prepareNext = () => {
-    if (!prepareWorker || preparing || !prepareQueue.length) return;
-    preparing = prepareQueue.shift()!;
-    prepareWorker.postMessage({ id: 0, file: preparing });
-  };
-  const preparePhoto = (file: File) => {
+  const preparePhoto = (file: File): Promise<boolean | null> => new Promise((resolve) => {
     try {
       if (!prepareWorker) {
         prepareWorker = new Worker(new URL("./scan-prepare-worker.js", import.meta.url), { type: "module" });
-        prepareWorker.onmessage = ({ data }) => {
-          if (preparing && data.features) preparedFeatures.set(preparing, data);
-          // Only report the latest actual adjacent pair, not an old backlog or
-          // a skipped frame. Descriptor matches are an early warning, not a pose solve.
-          if (preparing === photos.at(-1) && data.pair?.previous === photos.at(-2)?.name) {
-            weakPairUntil = data.pair.matches < 12 ? performance.now() + 4000 : 0;
-          }
-          preparing = null;
-          prepareNext();
-        };
         prepareWorker.onerror = stopPreparing;
       }
-      // Let the build-time pool handle overflow rather than retaining a long
-      // capture-time backlog on slower phones.
-      if (prepareQueue.length >= 4) return;
-      prepareQueue.push(file);
-      prepareNext();
-    } catch { stopPreparing(); }
-  };
+      finishPreparation = resolve;
+      prepareWorker.onmessage = ({ data }) => {
+        window.clearTimeout(preparationTimer);
+        if (data.features && data.accepted !== false) preparedFeatures.set(file, data);
+        finishPreparation = null;
+        resolve(data.accepted);
+      };
+      // A failed or slow worker must not strand capture or discard a photo.
+      preparationTimer = window.setTimeout(stopPreparing, 15000);
+      prepareWorker.postMessage({ id: 0, file });
+    } catch { stopPreparing(); resolve(null); }
+  });
   let captureTimer = 0;
   let cameraGeneration = 0;
   let stopSensing = () => {};
@@ -304,7 +298,7 @@ export function setupScanLab() {
     photoCount.textContent = `${photos.length}`;
     const needed = Math.max(0, MIN_PHOTOS - photos.length);
     const base = photos.length >= MAX_PHOTOS
-      ? "Photo limit reached. Build when ready."
+      ? `${MAX_PHOTOS}-photo limit reached. Photos saved; build or download them.`
       : needed
         ? `${needed} more to start · 30–60 recommended`
         : photos.length < 30 ? "Enough to try · more angles help" : "Photos collected · coverage checked during reconstruction";
@@ -358,8 +352,10 @@ export function setupScanLab() {
     stopCamera();
     stopPreparing();
     weakPairUntil = 0;
+    pendingCandidate = null;
     const generation = cameraGeneration;
     setError();
+    if (photos.length >= MAX_PHOTOS) return setError(`This scan already has ${MAX_PHOTOS} photos. Build or download it before clearing photos to start another scan.`);
     if (!navigator.mediaDevices?.getUserMedia) return setError("This browser cannot open the camera. Choose photos or a video instead.");
     // the compass and gyro give each photo's real direction around the object;
     // iOS asks for them on a tap, so this comes before the camera prompt
@@ -579,16 +575,8 @@ export function setupScanLab() {
       if (before === null) pose.anchor();
       const at = pose.angleForKeep(before, match?.dx ?? 0, match?.overlap ?? 1);
       const note = { step: pass().id, elevation: pose.elevation(), ringAngle: at, overlap: match?.overlap ?? null, at: Date.now() };
-      addPhotoToCoverage(coverage, at, match?.overlap ?? 1);
-      passPhotos++;
-      if (before !== null) {
-        const step = ((at - before + 540) % 360) - 180;
-        if (Math.abs(step) >= 3) ringDirection = step > 0 ? "cw" : "ccw";
-      }
-      paintRing();
-      lastKept = small.gray;
-      lastKeptAt = now;
       saving = true;
+      const capturedPass = passIndex;
       const frame = document.createElement("canvas");
       frame.width = sourceWidth;
       frame.height = sourceHeight;
@@ -597,21 +585,51 @@ export function setupScanLab() {
       viewport.classList.remove("flash");
       void viewport.offsetWidth;
       viewport.classList.add("flash");
-      frame.toBlob((blob) => {
+      frame.toBlob(async (blob) => {
         frame.width = frame.height = 0;
+        if (!blob || !stream || generation !== cameraGeneration) { saving = false; return; }
+        const file = new File([blob], `capture_${String(photos.length).padStart(3, "0")}.jpg`, { type: "image/jpeg" });
+        if (capturedPass !== passIndex) { saving = false; return; }
+        showGuide("hold", "Checking this photo · keep the camera near this angle");
+        const accepted = Math.max(sourceWidth, sourceHeight) <= 1920 ? await preparePhoto(file) : null;
         saving = false;
-        if (!blob || !stream || generation !== cameraGeneration) return;
+        if (!stream || generation !== cameraGeneration || capturedPass !== passIndex) return;
+        if (accepted === false) {
+          pendingCandidate ??= file;
+          weakPairUntil = performance.now() + 4000;
+          lastKeptAt = performance.now();
+          showGuide("lost", "Photo did not link · move back slightly and retry");
+          return;
+        }
+        // Replace only the unaccepted candidate. Already accepted coverage stays intact.
+        pendingCandidate = null;
+        weakPairUntil = 0;
+        addPhotoToCoverage(coverage, at, match?.overlap ?? 1);
+        passPhotos++;
+        if (before !== null) {
+          const step = ((at - before + 540) % 360) - 180;
+          if (Math.abs(step) >= 3) ringDirection = step > 0 ? "cw" : "ccw";
+        }
+        paintRing();
+        lastKept = small.gray;
+        lastKeptAt = now;
+
         if (ghost.src) URL.revokeObjectURL(ghost.src);
         ghost.src = URL.createObjectURL(blob);
-        const file = new File([blob], `capture_${String(photos.length).padStart(3, "0")}.jpg`, { type: "image/jpeg" });
         photoNotes.set(file, note);
         addPhoto(file);
-        // Above this size the normal loader may choose a different decode
-        // scale; do not reuse descriptors from a differently sampled image.
-        if (Math.max(sourceWidth, sourceHeight) <= 1920) preparePhoto(file);
         paintSteps();
-        if (photos.length >= MAX_PHOTOS) return stopCamera();
-        if (passDone(pass(), coverageFraction(coverage), passPhotos, pose.elevation() !== null)) enterPass(passIndex + 1);
+        const completed = passDone(pass(), coverageFraction(coverage), passPhotos, pose.elevation() !== null);
+        if (completed && passIndex === PASSES.length - 1) {
+          enterPass(passIndex + 1);
+          return;
+        }
+        if (photos.length >= MAX_PHOTOS) {
+          stopCamera();
+          setError(`Stopped at the ${MAX_PHOTOS}-photo limit before all steps finished. Your photos are saved; download them or try building this scan. Capture completion is not confirmed.`);
+          return;
+        }
+        if (completed) enterPass(passIndex + 1);
       }, "image/jpeg", 0.92);
     }, 120);
   }
