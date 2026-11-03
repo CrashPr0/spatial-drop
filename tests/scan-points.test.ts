@@ -29,3 +29,23 @@ test("splats keep position, color and opacity in the trainer layout", () => {
   assert.ok(Math.abs(1 / (1 + Math.exp(-cloud.data[13])) - 0.9) < 1e-6);
   assert.equal(cloud.data[6], 1);
 });
+
+test("flat, linear, duplicate and isolated points match exact neighbor distances", () => {
+  const flat = Array.from({ length: 120 }, (_, i) => [i % 12 / 100, Math.floor(i / 12) / 100, 0]);
+  const line = Array.from({ length: 120 }, (_, i) => [i / 100, 0, 0]);
+  for (const points of [flat, line, [...flat, [100, 200, 300]], Array.from({ length: 120 }, () => [0, 0, 0])]) {
+    for (const k of [1, 3, 7]) {
+      const actual = neighborSpacing(points, k);
+      points.forEach((p, i) => {
+        const expected = points.filter((_, j) => j !== i)
+          .map((q) => Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]))
+          .sort((a, b) => a - b)[k - 1];
+        assert.ok(Math.abs(actual[i] - expected) <= Math.max(1e-8, expected * 1e-7), `${i}: ${actual[i]} vs ${expected}`);
+      });
+    }
+  }
+});
+
+test("neighbor spacing rejects invalid neighbor counts", () => {
+  for (const k of [0, -1, 1.5, NaN, Infinity]) assert.throws(() => neighborSpacing(lattice, k), RangeError);
+});

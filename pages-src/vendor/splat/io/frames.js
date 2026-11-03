@@ -173,6 +173,9 @@ export function processSource(src, srcW, srcH, name, trainCap, opts = {}, preRes
 
   const tctx = drawScaled(src, srcW, srcH, tw, th);
   const tdata = tctx.getImageData(0, 0, tw, th).data;
+  // Reuse the filtered training image for the tiny UI preview.
+  const [thw, thh] = fitDims(srcW, srcH, 96);
+  const thumbCtx = drawScaled(tctx.canvas, tw, th, thw, thh);
   releaseCanvas(tctx.canvas);
   const rgb = new Float32Array(tw * th * 3);
   // Subject mask (opts.mask): a grayscale drawable, white = subject, at any
@@ -263,9 +266,6 @@ export function processSource(src, srcW, srcH, name, trainCap, opts = {}, preRes
     rgb[i * 3 + 2] = tdata[i * 4 + 2] / 255;
   }
 
-  // small thumbnail for UIs
-  const [thw, thh] = fitDims(srcW, srcH, 96);
-  const thumbCtx = drawScaled(src, srcW, srcH, thw, thh);
 
   return {
     name, fw, fh, gray, tw, th, rgb, sharpness,
@@ -322,6 +322,7 @@ export async function decodeFrames(files, opts = {}) {
   for (const file of files) {
     const source = file.source || file;
     const name = file.name || 'frame';
+    let bmp = null, mbmp = null;
     try {
       // Decode-to-target: a 12MP phone photo decoded at native res is ~48MB
       // of bitmap that exists only to be thrown away — 50 of those is what
@@ -330,7 +331,6 @@ export async function decodeFrames(files, opts = {}) {
       // filtered draw still gets a >=2x supersampled source, so quality is
       // the same as the full halving chain). resizeWidth ALONE keeps the
       // scale uniform whatever EXIF orientation does to the axes.
-      let bmp = null;
       let resized = false;
       const dims = source instanceof Blob ? await probeImageSize(source) : null;
       if (!trainCap && dims) {
@@ -356,7 +356,6 @@ export async function decodeFrames(files, opts = {}) {
       }
       // per-file subject mask (grayscale; white = subject). Decoded at its own
       // native size — processSource scales it to the training grid.
-      let mbmp = null;
       if (file.mask) mbmp = await createImageBitmap(file.mask);
       else if (opts.alphaMask) mbmp = await alphaAsMask(source);
       const frame = processSource(bmp, bmp.width, bmp.height, name, trainCap,
@@ -365,7 +364,8 @@ export async function decodeFrames(files, opts = {}) {
       frame.srcW = resized ? dims.w : bmp.width;
       frame.srcH = resized ? dims.h : bmp.height;
       bmp.close();
-      if (mbmp) mbmp.close();
+      bmp = null;
+      if (mbmp) { mbmp.close(); mbmp = null; }
       // the photo's focal length, when the file carries it (JPEG / HEIC EXIF):
       // the solver turns an agreeing set into a focal prior and skips its
       // four-candidate focal search (session.solve)
@@ -375,6 +375,9 @@ export async function decodeFrames(files, opts = {}) {
       out.push(frame);
     } catch (e) {
       log(`skipped ${name}: ${e.message}`);
+    } finally {
+      bmp?.close();
+      mbmp?.close();
     }
   }
   return out;

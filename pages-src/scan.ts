@@ -65,7 +65,14 @@ function runMeshWorker(job: MeshJob, onProgress: (message: Extract<MeshWorkerMes
       else reject(new Error(data.message));
     };
     worker.onerror = (event) => { finish(); reject(new Error(event.message || "The meshing worker failed.")); };
-    worker.postMessage(job);
+    if (signal.aborted) return abort();
+    // The caller supplies a copy for this job; transfer it instead of cloning it again.
+    try {
+      worker.postMessage(job, [job.splat.data.buffer]);
+    } catch (reason) {
+      finish();
+      reject(reason);
+    }
   });
 }
 
@@ -204,6 +211,7 @@ export function setupScanLab() {
   const photoNotes = new WeakMap<File, { step: string; elevation: number | null; ringAngle: number; overlap: number | null; at: number }>();
   let stream: MediaStream | null = null;
   let captureTimer = 0;
+  let cameraGeneration = 0;
   let stopSensing = () => {};
   // how the live ring reads, appended to the photo hint while capturing
   let coverageNote = "";
@@ -278,6 +286,7 @@ export function setupScanLab() {
 
   // ── capture ────────────────────────────────────────────────────────────
   function stopCamera() {
+    cameraGeneration++;
     window.clearInterval(captureTimer);
     captureTimer = 0;
     stream?.getTracks().forEach((track) => track.stop());
@@ -305,24 +314,32 @@ export function setupScanLab() {
   }
 
   async function startCamera() {
+    stopCamera();
+    const generation = cameraGeneration;
     setError();
     if (!navigator.mediaDevices?.getUserMedia) return setError("This browser cannot open the camera. Choose photos or a video instead.");
     // the compass and gyro give each photo's real direction around the object;
     // iOS asks for them on a tap, so this comes before the camera prompt
     const pose = new PoseTracker();
     let coverage = createCoverage();
-    stopSensing = await listenForOrientation((reading) => pose.sense(reading));
+    const stopOrientation = await listenForOrientation((reading) => pose.sense(reading));
+    if (generation !== cameraGeneration) { stopOrientation(); return; }
+    stopSensing = stopOrientation;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({
+      const opened = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
         audio: false,
       });
+      if (generation !== cameraGeneration) { opened.getTracks().forEach((track) => track.stop()); return; }
+      stream = opened;
     } catch {
+      if (generation !== cameraGeneration) return;
       stopSensing();
       return setError("Camera access was blocked. Allow the camera, or choose photos or a video instead.");
     }
     video.srcObject = stream;
     await video.play().catch(() => undefined);
+    if (generation !== cameraGeneration) return;
     viewport.classList.add("camera-active");
     idle.hidden = true;
     cameraButton.hidden = true;
@@ -434,7 +451,12 @@ export function setupScanLab() {
       const feed = import.meta.env.DEV ? (window as { spatialDropCaptureSource?: HTMLCanvasElement }).spatialDropCaptureSource : undefined;
       const source: CanvasImageSource = feed ?? video;
       const sourceWidth = feed?.width ?? video.videoWidth, sourceHeight = feed?.height ?? video.videoHeight;
-      if (saving || !sourceWidth || photos.length >= MAX_PHOTOS) return;
+      if (document.hidden) {
+        previousFrame = null;
+        holdingSince = 0;
+        return;
+      }
+      if (saving || !sourceWidth || !sourceHeight || photos.length >= MAX_PHOTOS) return;
       const now = performance.now();
       if (now < countdownEnds) {
         countdown.textContent = `${Math.ceil((countdownEnds - now) / 1000)}`;
@@ -532,7 +554,7 @@ export function setupScanLab() {
       frame.getContext("2d")!.drawImage(source, 0, 0);
       frame.toBlob((blob) => {
         saving = false;
-        if (!blob || !stream) return;
+        if (!blob || !stream || generation !== cameraGeneration) return;
         viewport.classList.remove("flash");
         void viewport.offsetWidth;
         viewport.classList.add("flash");

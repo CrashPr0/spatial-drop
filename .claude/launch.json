@@ -1,0 +1,31 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "pages",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": [
+        "vite",
+        "--config",
+        "pages.vite.config.ts",
+        "--port",
+        "5174",
+        "--strictPort"
+      ],
+      "port": 5174
+    },
+    {
+      "name": "pages-tools",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": [
+        "vite",
+        "--config",
+        "/private/tmp/claude-501/-Users-crashbook-Documents-GitHub-spatial-drop/2c3760bc-2f36-48c1-bb4b-69eb3207bfce/scratchpad/pages-dev.vite.config.ts",
+        "--port",
+        "5175",
+        "--strictPort"
+      ],
+      "port": 5175
+    }
+  ]
+}

@@ -56,10 +56,18 @@ async function decodePhoto(file: Blob, largest = TEXTURE_PHOTO_MAX) {
   const scale = Math.min(1, largest / Math.max(bitmap.width, bitmap.height));
   const width = Math.round(bitmap.width * scale), height = Math.round(bitmap.height * scale);
   const canvas = new OffscreenCanvas(width, height);
-  const context = canvas.getContext("2d", { willReadFrequently: true })!;
-  context.drawImage(bitmap, 0, 0, width, height);
-  bitmap.close();
-  return context.getImageData(0, 0, width, height);
+  try {
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) throw new Error("Photo decoding needs a 2D canvas context.");
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = "high";
+    context.drawImage(bitmap, 0, 0, width, height);
+    return context.getImageData(0, 0, width, height);
+  } finally {
+    bitmap.close();
+    // Release backing stores promptly on memory-constrained mobile browsers.
+    canvas.width = canvas.height = 0;
+  }
 }
 
 /** Pair each solved camera with its photo by file name (frames that failed to decode are skipped). */

@@ -14,48 +14,48 @@ export interface SolvedPoint {
   rgb: ArrayLike<number>;
 }
 
-/** Distance from each point to its k-th nearest neighbor, through a uniform grid. */
+/** Distance to the k-th nearest neighbor, using a balanced spatial tree.
+ * Unlike a volume-based grid, this also handles flat scans and isolated points.
+ */
 export function neighborSpacing(points: ArrayLike<number>[], k = 4) {
+  if (!Number.isInteger(k) || k < 1) throw new RangeError("k must be a positive integer");
   const n = points.length;
   const spacing = new Float32Array(n);
   if (n <= k) return spacing.fill(0.01);
-  const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
-  for (const p of points) for (let a = 0; a < 3; a++) { min[a] = Math.min(min[a], p[a]); max[a] = Math.max(max[a], p[a]); }
-  // about two points per cell if they filled the box
-  const volume = Math.max(1e-12, (max[0] - min[0]) * (max[1] - min[1]) * (max[2] - min[2]));
-  const cell = Math.max(1e-6, Math.cbrt((2 * volume) / n));
-  const key = (x: number, y: number, z: number) => `${x},${y},${z}`;
-  const cellOf = (p: ArrayLike<number>) => [0, 1, 2].map((a) => Math.floor((p[a] - min[a]) / cell));
-  const grid = new Map<string, number[]>();
-  points.forEach((p, i) => {
-    const [x, y, z] = cellOf(p);
-    const id = key(x, y, z);
-    const list = grid.get(id);
-    if (list) list.push(i); else grid.set(id, [i]);
-  });
-  const cells = [0, 1, 2].map((a) => Math.ceil((max[a] - min[a]) / cell) + 1);
-  const best: number[] = [];
+  interface Node { index: number; axis: number; left: Node | null; right: Node | null }
+  const build = (indices: number[]): Node | null => {
+    if (!indices.length) return null;
+    const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+    for (const i of indices) for (let a = 0; a < 3; a++) {
+      min[a] = Math.min(min[a], points[i][a]); max[a] = Math.max(max[a], points[i][a]);
+    }
+    let axis = 0;
+    for (let a = 1; a < 3; a++) if (max[a] - min[a] > max[axis] - min[axis]) axis = a;
+    indices.sort((a, b) => points[a][axis] - points[b][axis]);
+    const mid = indices.length >> 1;
+    return { index: indices[mid], axis, left: build(indices.slice(0, mid)), right: build(indices.slice(mid + 1)) };
+  };
+  const root = build(Array.from({ length: n }, (_, i) => i));
   for (let i = 0; i < n; i++) {
-    const p = points[i];
-    const [cx, cy, cz] = cellOf(p);
-    // widen the search shell until k neighbors are found and none closer can hide outside it
-    for (let ring = 1; ; ring++) {
-      best.length = 0;
-      for (let x = cx - ring; x <= cx + ring; x++) for (let y = cy - ring; y <= cy + ring; y++) for (let z = cz - ring; z <= cz + ring; z++) {
-        const list = grid.get(key(x, y, z));
-        if (!list) continue;
-        for (const j of list) {
-          if (j === i) continue;
-          const q = points[j];
-          best.push(Math.hypot(q[0] - p[0], q[1] - p[1], q[2] - p[2]));
+    const p = points[i], best: number[] = [];
+    const visit = (node: Node | null): void => {
+      if (!node) return;
+      const q = points[node.index];
+      const delta = p[node.axis] - q[node.axis];
+      if (node.index !== i) {
+        const distance = (p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2 + (p[2] - q[2]) ** 2;
+        if (best.length < k || distance < best[best.length - 1]) {
+          let at = best.length;
+          while (at > 0 && best[at - 1] > distance) at--;
+          best.splice(at, 0, distance);
+          if (best.length > k) best.pop();
         }
       }
-      best.sort((a, b) => a - b);
-      if ((best.length >= k && best[k - 1] <= ring * cell) || ring > Math.max(...cells)) {
-        spacing[i] = best[Math.min(k, best.length) - 1] ?? cell;
-        break;
-      }
-    }
+      visit(delta <= 0 ? node.left : node.right);
+      if (best.length < k || delta * delta < best[k - 1]) visit(delta <= 0 ? node.right : node.left);
+    };
+    visit(root);
+    spacing[i] = Math.sqrt(best[k - 1]);
   }
   return spacing;
 }
