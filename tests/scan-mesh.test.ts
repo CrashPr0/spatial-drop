@@ -230,3 +230,99 @@ test("the training region hugs the object's sparse points, not the camera ring",
     assert.ok(Math.hypot(x, z) < region.radius && y > region.bottom && y < region.top, `ball point ${i} outside`);
   }
 });
+
+// A drinks can among clutter, +Y up, meters: the can (6.6 x 16.8 cm) at the
+// origin on a table at y = 0, a bottle, a box and a mug 9-16 cm away, a shelf
+// behind. Cameras circle at arm's length for a small object, as the guided
+// capture takes them: one loop at the can's height, one from above.
+const CAN_R = 0.033, CAN_H = 0.168;
+const clutter = [
+  { kind: "cylinder", at: [-0.13, -0.08], r: 0.035, h: 0.22 },
+  { kind: "box", at: [0.13, 0.04], size: [0.09, 0.07, 0.06] },
+  { kind: "cylinder", at: [0.04, -0.15], r: 0.04, h: 0.09 },
+  { kind: "box", at: [0, -0.42], size: [0.9, 0.5, 0.03] },
+] as const;
+
+function canCameras(): ScanCamera[] {
+  const target: Vec3 = [0, CAN_H / 2, 0];
+  return [[0.3, 0.1, 0], [0.24, 0.3, 0.1]].flatMap(([r, h, offset]) => Array.from({ length: 24 }, (_, i) => {
+    const a = (i / 24) * Math.PI * 2 + offset;
+    const position: Vec3 = [r * Math.sin(a), h, r * Math.cos(a)];
+    const toward = target.map((v, k) => v - position[k]);
+    const l = Math.hypot(...toward);
+    const forward = toward.map((v) => v / l) as Vec3;
+    // image up: world up made square to the view
+    const up = [0, 1, 0].map((v, k) => v - forward[1] * forward[k]);
+    const u = Math.hypot(...up);
+    return { position, forward, up: up.map((v) => v / u) as Vec3 };
+  }));
+}
+
+/** Points on every surface of the can scene: `perArea` points per square meter. */
+function canScene(perArea: number, seed = 5) {
+  const random = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const can: Vec3[] = [], other: Vec3[] = [];
+  const cylinder = (out: Vec3[], cx: number, cz: number, r: number, h: number) => {
+    for (let i = 0, n = Math.round(2 * Math.PI * r * h * perArea); i < n; i++) {
+      const a = random() * Math.PI * 2;
+      out.push([cx + r * Math.cos(a), random() * h, cz + r * Math.sin(a)]);
+    }
+    for (let i = 0, n = Math.round(Math.PI * r * r * perArea); i < n; i++) {
+      const a = random() * Math.PI * 2, d = r * Math.sqrt(random());
+      out.push([cx + d * Math.cos(a), h, cz + d * Math.sin(a)]);
+    }
+  };
+  const box = (out: Vec3[], cx: number, cz: number, [w, h, d]: readonly number[]) => {
+    for (let i = 0, n = Math.round(2 * (w * h + h * d + w * d) * perArea); i < n; i++) {
+      const p: Vec3 = [(random() - 0.5) * w, random() * h, (random() - 0.5) * d];
+      // push each point out to a face
+      const face = Math.floor(random() * 3), sign = random() < 0.5 ? -0.5 : 0.5;
+      if (face === 0) p[0] = sign * w; else if (face === 1) p[1] = sign < 0 ? 0 : h; else p[2] = sign * d;
+      out.push([cx + p[0], p[1], cz + p[2]]);
+    }
+  };
+  cylinder(can, 0, 0, CAN_R, CAN_H);
+  for (const item of clutter) {
+    if (item.kind === "cylinder") cylinder(other, item.at[0], item.at[1], item.r, item.h);
+    else box(other, item.at[0], item.at[1], item.size);
+  }
+  for (let i = 0, n = Math.round(0.8 * 0.8 * perArea * 0.3); i < n; i++) other.push([(random() - 0.5) * 0.8, 0, (random() - 0.5) * 0.8]);
+  return { can, other };
+}
+
+const cloudOf = (points: Vec3[]): SplatCloud => ({
+  data: Float32Array.from(points.flatMap((p) => [...p, Math.log(0.003), Math.log(0.003), Math.log(0.003), 1, 0, 0, 0, 0, 0, 0, logit(0.95), 0, 0])),
+  n: points.length,
+  dc: "sigmoid",
+});
+
+test("the object region finds the can, not its neighbors on the table", () => {
+  // sparse points, as a solve leaves them
+  const { can, other } = canScene(6000);
+  const region = subjectCylinder([...can, ...other], canCameras());
+  const local = (p: Vec3) => [0, 1, 2].map((r) => region.rotation[r * 3] * (p[0] - region.center[0]) + region.rotation[r * 3 + 1] * (p[1] - region.center[1]) + region.rotation[r * 3 + 2] * (p[2] - region.center[2]));
+  // padded past the can's 3.3 cm, short of the box 8.5 cm away
+  assert.ok(region.radius > CAN_R && region.radius < 0.075, `radius ${region.radius}`);
+  for (const p of can) {
+    const [x, y, z] = local(p);
+    assert.ok(Math.hypot(x, z) < region.radius && y > region.bottom && y < region.top, "every can point is inside");
+  }
+  // the bottle is taller than the can: its top must not set the region's height
+  assert.ok(region.top < local([0, 0.21, 0])[1], `top ${region.top}`);
+});
+
+test("the mesh keeps to the object, and loose pieces off its center are dropped", () => {
+  const { can, other } = canScene(400000, 9);
+  const cloud = cloudOf([...can, ...other]);
+  const cameras = canCameras();
+  const sparse = canScene(6000);
+  const subject = subjectCylinder([...sparse.can, ...sparse.other], cameras);
+  const width = (mesh: ReturnType<typeof buildScanMesh>) => Math.max(mesh.stats.sizeMeters[0], mesh.stats.sizeMeters[2]);
+  const options = { heightMeters: CAN_H, resolution: 80 };
+  // the old crop, a share of the camera ring, takes in pieces of the box and the mug (12.6 cm wide)
+  assert.ok(width(buildScanMesh(cloud, cameras, options)) > 0.1);
+  // the can is 6.6 cm across; carving leaves a few millimeters (7.8 cm measured)
+  assert.ok(width(buildScanMesh(cloud, cameras, { ...options, subject })) < 0.085, "the object region keeps to the can");
+  // a crop twice as wide takes in edges of the box and bottle, which stand apart from the can
+  assert.ok(width(buildScanMesh(cloud, cameras, { ...options, subject, crop: 0.9 })) < 0.085, "loose pieces are dropped");
+});

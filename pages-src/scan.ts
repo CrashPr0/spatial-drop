@@ -5,7 +5,7 @@ import { addPhotoToCoverage, coverageFraction, createCoverage, missingSides, nea
 import { cropToSubject } from "./scan-crop";
 import { PASSES, passDone, passProgress, tiltAdvice } from "./scan-passes";
 import { pointSplats } from "./scan-points";
-import { subjectCylinder, type ScanCamera, type Vec3 } from "./scan-mesh";
+import { subjectCylinder, type ScanCamera, type SubjectRegion, type Vec3 } from "./scan-mesh";
 import { buildUsdz } from "./scan-usdz";
 import type { MeshJob, MeshWorkerMessage, ViewMeta } from "./scan-worker";
 
@@ -168,6 +168,7 @@ export function setupScanLab() {
   const photoCount = $("#scan-photo-count");
   const captureHint = $("#scan-capture-hint");
   const clearButton = $<HTMLButtonElement>("#scan-clear-button");
+  const photosButton = $<HTMLButtonElement>("#scan-photos-button");
   const buildButton = $<HTMLButtonElement>("#scan-build-button");
   const error = $("#scan-error");
   const stageTitle = $("#scan-stage-title");
@@ -196,6 +197,8 @@ export function setupScanLab() {
 
   let state: ScanState = "idle";
   let photos: File[] = [];
+  // how each live photo was taken, saved with "Download photos" so a scan can be rebuilt and studied elsewhere
+  const photoNotes = new WeakMap<File, { step: string; elevation: number | null; ringAngle: number; overlap: number | null; at: number }>();
   let stream: MediaStream | null = null;
   let captureTimer = 0;
   let stopSensing = () => {};
@@ -205,6 +208,8 @@ export function setupScanLab() {
   let splat: { data: Float32Array; n: number; dc: "sigmoid" | "sh" } | null = null;
   let cameras: ScanCamera[] = [];
   let viewMetas: ViewMeta[] = [];
+  // the object's region from the solve: training crops to it and the mesher keeps to it
+  let subjectRegion: SubjectRegion | undefined;
   let fullIntrinsics = new Map<number, Pick<ViewMeta, "featureWidth" | "featureHeight" | "cx" | "cy">>();
   let scannedPhotos: File[] = [];
   let glbBlob: Blob | null = null;
@@ -237,6 +242,7 @@ export function setupScanLab() {
     buildButton.disabled = busy || photos.length < MIN_PHOTOS;
     cameraButton.disabled = busy;
     clearButton.disabled = busy || !photos.length;
+    photosButton.disabled = !photos.length;
     dropZone.classList.toggle("disabled", busy);
     finishButton.hidden = next !== "training";
     rebuildButton.disabled = next !== "ready";
@@ -505,6 +511,7 @@ export function setupScanLab() {
       const before = coverage.last;
       if (before === null) pose.anchor();
       const at = pose.angleForKeep(before, match?.dx ?? 0, match?.overlap ?? 1);
+      const note = { step: pass().id, elevation: pose.elevation(), ringAngle: at, overlap: match?.overlap ?? null, at: Date.now() };
       addPhotoToCoverage(coverage, at, match?.overlap ?? 1);
       passPhotos++;
       if (before !== null) {
@@ -528,7 +535,9 @@ export function setupScanLab() {
         viewport.classList.add("flash");
         if (ghost.src) URL.revokeObjectURL(ghost.src);
         ghost.src = URL.createObjectURL(blob);
-        addPhoto(new File([blob], `capture_${String(photos.length).padStart(3, "0")}.jpg`, { type: "image/jpeg" }));
+        const file = new File([blob], `capture_${String(photos.length).padStart(3, "0")}.jpg`, { type: "image/jpeg" });
+        photoNotes.set(file, note);
+        addPhoto(file);
         paintSteps();
         if (photos.length >= MAX_PHOTOS) return stopCamera();
         if (passDone(pass(), coverageFraction(coverage), passPhotos)) enterPass(passIndex + 1);
@@ -578,6 +587,7 @@ export function setupScanLab() {
     session?.dispose();
     session = null;
     splat = null;
+    subjectRegion = undefined;
     meshPanel.hidden = true;
     liveCanvas.hidden = true;
     setState("building");
@@ -669,16 +679,17 @@ export function setupScanLab() {
       mark("solved");
       phases.solved = performance.now();
       phases.noGpu = !gpu;
+      const region = subjectCylinder(
+        created.recon.points.map((point: { X: number[] }) => point.X as Vec3),
+        orbitCameras(created.recon.cams),
+      );
+      subjectRegion = region;
       if (!gpu) {
         phases.trainStart = phases.trained = performance.now();
         setState("meshing");
         await finishModel(created, pointSplats(created.recon.points));
         return;
       }
-      const region = subjectCylinder(
-        created.recon.points.map((point: { X: number[] }) => point.X as Vec3),
-        orbitCameras(created.recon.cams),
-      );
       cropToSubject(created.frames, created.recon.cams, region);
       mark("cropped");
       await created.seed();
@@ -747,7 +758,7 @@ export function setupScanLab() {
           k1: recon.k1 ?? 0, k2: recon.k2 ?? 0, ...full,
         };
       });
-      if (import.meta.env.DEV) Object.assign(window, { spatialDropScan: { splat, cameras, viewMetas, session: current } });
+      if (import.meta.env.DEV) Object.assign(window, { spatialDropScan: { splat, cameras, viewMetas, session: current, subject: subjectRegion } });
       await makeMesh();
     } finally {
       stopClock();
@@ -776,6 +787,7 @@ export function setupScanLab() {
           heightMeters: heightCm / 100,
           crop: Number(cropInput.value),
           density: Number(densityInput.value),
+          subject: subjectRegion,
           resolution: 104,
           targetTriangles: DETAIL_TRIANGLES[detailInput.value] ?? DETAIL_TRIANGLES.standard,
         },
@@ -876,6 +888,31 @@ export function setupScanLab() {
     void acceptFiles(Array.from(fileInput.files || []));
     fileInput.value = "";
   });
+  // the photos as one zip (stored, not compressed: they are JPEGs already) with
+  // capture.json beside them: the step, tilt and ring angle of each live photo
+  photosButton.addEventListener("click", async () => {
+    if (!photos.length) return;
+    photosButton.disabled = true;
+    try {
+      const { strToU8, zipSync } = await import("three/addons/libs/fflate.module.js");
+      const entries: Record<string, [Uint8Array, { level: 0 }]> = {};
+      const listed = [];
+      for (const [i, photo] of photos.entries()) {
+        // uploaded photos can share a name
+        const name = photo.name in entries ? `${i}_${photo.name}` : photo.name;
+        entries[name] = [new Uint8Array(await photo.arrayBuffer()), { level: 0 }];
+        listed.push({ name, ...photoNotes.get(photo) });
+      }
+      const capture = { app: "Spatial Drop", made: new Date().toISOString(), userAgent: navigator.userAgent, photos: listed };
+      entries["capture.json"] = [strToU8(JSON.stringify(capture, null, 1)), { level: 0 }];
+      const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "");
+      download(new Blob([zipSync(entries)], { type: "application/zip" }), `spatial-drop-photos-${stamp}.zip`);
+    } catch (reason) {
+      setError(reason instanceof Error ? `The photos could not be packed: ${reason.message}` : "The photos could not be packed.");
+    } finally {
+      photosButton.disabled = !photos.length;
+    }
+  });
   clearButton.addEventListener("click", () => {
     photos = [];
     renderPhotos();
@@ -899,8 +936,9 @@ export function setupScanLab() {
   });
   if (import.meta.env.DEV) {
     Object.assign(window, {
-      spatialDropLoadSplat(saved: { data: Float32Array; n: number; dc: "sigmoid" | "sh"; cameras: ScanCamera[]; viewMetas?: ViewMeta[] }, files: File[] = []) {
+      spatialDropLoadSplat(saved: { data: Float32Array; n: number; dc: "sigmoid" | "sh"; cameras: ScanCamera[]; viewMetas?: ViewMeta[]; subject?: SubjectRegion }, files: File[] = []) {
         splat = { data: saved.data, n: saved.n, dc: saved.dc };
+        subjectRegion = saved.subject;
         cameras = saved.cameras;
         viewMetas = saved.viewMetas ?? [];
         scannedPhotos = files;
