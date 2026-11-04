@@ -1,3 +1,4 @@
+import { scanDraft } from "./scan-storage";
 import { BufferAttribute, BufferGeometry, CanvasTexture, LinearFilter, Mesh, MeshStandardMaterial, SRGBColorSpace } from "three";
 import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
 import { adviseOrbit, adviseCapture, matchFrames, pointTo, shrink, type Arrow, type Heading } from "./scan-capture";
@@ -210,6 +211,20 @@ export function setupScanLab() {
 
   let state: ScanState = "idle";
   let photos: File[] = [];
+  type SolvedDraft = { recon: ReturnType<SplatSession["useReconstruction"]>; dimensions: number[][]; names: string[] };
+  type Draft = { version: 1; photos: File[]; solved?: SolvedDraft; settings: string[] };
+  let solvedDraft: SolvedDraft | undefined;
+  let solvedFiles: File[] = [];
+  let draftTimer = 0;
+  let draftWrites: Promise<unknown> = Promise.resolve();
+  const samePhotos = () => photos.length === solvedFiles.length && photos.every((p, i) => p === solvedFiles[i]);
+  const saveDraft = () => {
+    const draft: Draft = { version: 1, photos: photos.slice(), solved: samePhotos() ? solvedDraft : undefined,
+      settings: [heightInput.value, cropInput.value, densityInput.value, detailInput.value, shapeInput.value] };
+    draftWrites = draftWrites.catch(() => {}).then(() => scanDraft("write", draft)).catch(() => {
+      setError("Local scan backup is unavailable. Keep this tab open or download your photos.");
+    });
+  };
   // how each live photo was taken, saved with "Download photos" so a scan can be rebuilt and studied elsewhere
   const photoNotes = new WeakMap<File, { step: string; elevation: number | null; ringAngle: number; overlap: number | null; at: number }>();
   let stream: MediaStream | null = null;
@@ -251,6 +266,7 @@ export function setupScanLab() {
   // how the live ring reads, appended to the photo hint while capturing
   let coverageNote = "";
   let session: SplatSession | null = null;
+  let retryTraining: (() => void) | null = null;
   let splat: { data: Float32Array; n: number; dc: "sigmoid" | "sh" } | null = null;
   let cameras: ScanCamera[] = [];
   let viewMetas: ViewMeta[] = [];
@@ -295,6 +311,8 @@ export function setupScanLab() {
   }
 
   function renderPhotos() {
+    window.clearTimeout(draftTimer);
+    draftTimer = window.setTimeout(saveDraft, 500);
     photoCount.textContent = `${photos.length}`;
     const needed = Math.max(0, MIN_PHOTOS - photos.length);
     const base = photos.length >= MAX_PHOTOS
@@ -670,12 +688,25 @@ export function setupScanLab() {
     window.clearInterval(lookTimer);
   }
 
-  async function build() {
+  async function build(attempt = 0) {
+    try { await buildAttempt(attempt); }
+    catch (reason) {
+      const failed = session;
+      session = null;
+      try { failed?.dispose(); } catch { /* already lost */ }
+      stopClock();
+      setState("idle");
+      setError(reason instanceof Error ? reason.message : "The scan could not be started. Your photos are retained.");
+    }
+  }
+
+  async function buildAttempt(attempt: number) {
     setError();
     stopCamera();
     stopPreparing();
-    session?.dispose();
+    const previousSession = session;
     session = null;
+    previousSession?.dispose();
     splat = null;
     subjectRegion = undefined;
     meshPanel.hidden = true;
@@ -687,12 +718,12 @@ export function setupScanLab() {
       metricTime.textContent = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
     }, 1000);
 
-    const { createSession, focalPxFrom35, solveTierOpts } = await loadSplat();
+    const { createSession, focalPxFrom35, solveTierOpts, undistortFrames } = await loadSplat();
     const phone = isPhone();
     // without WebGPU (Safari before 26, Lockdown Mode) the cameras still solve
     // on the CPU and the model is carved from the solve's points instead of a
     // trained splat: rougher shape, same photo texture
-    const gpu = await hasWebGpu();
+    const gpu = attempt < 2 && await hasWebGpu();
     // The splat only has to get the shape right (color comes from the photos), and
     // that settles early. Measured on the synthetic orbit, three runs each:
     // 2000 steps from 20k splats: 8.5-9.1 s, 2.7-3.1 mm, 25.1-25.2 dB held out;
@@ -702,18 +733,30 @@ export function setupScanLab() {
       maxIters,
       holdout: -1,
       evalHoldEvery: 1e9,
-      initTarget: 20000,
+      initTarget: attempt === 1 ? 10000 : 20000,
       ...(phone ? { lowMem: true, frames: { targetBudgetBytes: 180e6 } } : {}),
+      ...(attempt > 0 ? { lowMem: true, frames: { targetBudgetBytes: 90e6, trainMaxDim: 640 } } : {}),
       // This UI only previews training cameras; no oversized orbit viewport.
       maxViewW: 1,
       maxViewH: 1,
       ...(gpu ? {} : { noGpu: true }),
       sfm: { ...solveTierOpts("quick"), uiYield: true, ...(phone ? { workers: 3 } : {}) },
-      trainer: { maxSplats: phone ? 300000 : 600000, capMult: 8 },
+      trainer: { maxSplats: attempt === 1 ? 80000 : phone ? 300000 : 600000, capMult: attempt === 1 ? 4 : 8 },
       // the browser harness (tests/browser/scan-orbit.js) tries other settings through this
       ...(import.meta.env.DEV ? (window as { spatialDropSessionOverrides?: object }).spatialDropSessionOverrides : {}),
     });
     session = created;
+    const retry = () => {
+      if (session !== created || attempt >= 2) return;
+      session = null;
+      stopClock();
+      meshJob?.abort();
+      liveCanvas.hidden = true;
+      try { created.dispose(); } catch { /* device already lost */ }
+      setProgress("Recovering scan", 0, attempt === 0 ? "Retrying with a smaller GPU workload…" : "Continuing without GPU training; the model will have less detail.");
+      void build(attempt + 1);
+    };
+    retryTraining = retry;
     // dev builds keep splat.js's own timing log for the browser harness
     const devLog: [number, string][] | null = import.meta.env.DEV ? [] : null;
     if (devLog) {
@@ -743,16 +786,7 @@ export function setupScanLab() {
       if (session !== created) return;
       if (event.kind === "train-complete") void afterTraining();
       if (event.kind === "device-lost") {
-        // Invalidate before disposal: outstanding GPU work may still settle
-        // and must not re-enter training or disable the retry button.
-        session = null;
-        stopClock();
-        meshJob?.abort();
-        liveCanvas.hidden = true;
-        setState("idle");
-        setProgress("GPU interrupted", 0, "Photos retained. Press Build 3D model to retry.");
-        try { created.dispose(); } catch { /* the device is already gone */ }
-        setError("The browser released the GPU. This can happen under memory pressure or when the tab is backgrounded. Your photos are still here; keep this tab visible and build again.");
+        retry();
       }
     });
 
@@ -772,9 +806,17 @@ export function setupScanLab() {
       // solver's search can lock onto a wrong lens and scatter the cameras
       const frames = created.frames as { fw: number; fh: number; exif?: { f35?: number } | null }[];
       const tagged = frames.filter((frame) => (frame.exif?.f35 ?? 0) > 0).length;
-      await created.solve(tagged >= 0.6 * frames.length ? {} : {
-        focalPrior: focalPxFrom35(PHONE_MAIN_LENS_MM, frames[0].fw, frames[0].fh),
-      });
+      const reusable = samePhotos() && solvedDraft && solvedDraft.dimensions.length === frames.length
+        && frames.every((f, i) => f.fw === solvedDraft!.dimensions[i][0] && f.fh === solvedDraft!.dimensions[i][1]
+          && created.frames[i].name === solvedDraft!.names?.[i]);
+      if (reusable) {
+        created.useReconstruction(structuredClone(solvedDraft!.recon));
+        undistortFrames(created.frames, created.recon);
+      } else {
+        await created.solve(tagged >= 0.6 * frames.length ? {} : {
+          focalPrior: focalPxFrom35(PHONE_MAIN_LENS_MM, frames[0].fw, frames[0].fh),
+        });
+      }
       if (session !== created) return;
       // Descriptor copies are no longer useful once the camera solve finishes.
       byName.clear();
@@ -784,6 +826,10 @@ export function setupScanLab() {
       if (!hasEnoughSolvedViews(placed, scannedPhotos.length)) {
         throw new Error(`Only ${placed} of ${photos.length} photos could be placed. Too many views are missing for a reliable model. Keep the object larger in the frame, move in smaller steps, and keep it stationary. Your photos are still available to download.`);
       }
+      // Save before cropping or training mutates camera intrinsics and points.
+      solvedDraft = { recon: structuredClone(created.recon), dimensions: frames.map((f) => [f.fw, f.fh]), names: created.frames.map((f: { name: string }) => f.name) };
+      solvedFiles = scannedPhotos.slice();
+      saveDraft();
       setProgress(STAGE_LABELS.seed, 48, gpu ? `${placed} cameras solved. Starting the splat trainer…` : `${placed} cameras solved.`);
       // texturing and carving project into the full photos: keep their intrinsics
       fullIntrinsics = new Map(created.recon.cams.map((camera: { imgIdx: number; cx?: number; cy?: number }) => {
@@ -831,9 +877,10 @@ export function setupScanLab() {
       created.start();
     } catch (reason) {
       if (session !== created) return;
+      if (gpu && samePhotos() && solvedDraft && attempt < 2) { retry(); return; }
       stopClock();
+      session = null;
       created.dispose();
-      if (session === created) session = null;
       setState("idle");
       setProgress("Scan stopped", 0, "");
       setError(reason instanceof Error ? reason.message : "The scan could not be reconstructed.");
@@ -854,6 +901,7 @@ export function setupScanLab() {
       await finishModel(current, { data: Float32Array.from(raw.data.subarray(0, raw.n * 16)), n: raw.n, dc: current.trainer.dcMode });
     } catch (reason) {
       if (session !== current) return;
+      if (retryTraining) { retryTraining(); return; }
       setState("idle");
       setError(reason instanceof Error ? reason.message : "The trained splat could not be read.");
     } finally {
@@ -940,7 +988,7 @@ export function setupScanLab() {
       phases.trained = 0;
       meshPanel.hidden = false;
       setProgress("Model ready", 100, phases.noGpu
-        ? "Built without WebGPU, so the shape is rougher than usual. Safari 26 or a recent Chrome builds the full-quality model."
+        ? "Built without GPU training. This recovery model has less geometric detail; your original photos are retained."
         : "Your scan is a local GLB now. Place it in AR, open it in Studio, or download it.");
       window.dispatchEvent(new CustomEvent("spatialdrop:scanready", { detail: glbUrl }));
       setState("ready");
@@ -1073,5 +1121,17 @@ export function setupScanLab() {
     if ((event as CustomEvent<string>).detail !== "scan") stopCamera();
   });
   window.addEventListener("pagehide", () => { stopCamera(); stopPreparing(); });
-  renderPhotos();
+  // Restore only if the user has not started another scan while storage opens.
+  void scanDraft<Draft>("read").then((draft) => {
+    if (!draft || draft.version !== 1 || !draft.photos.length || photos.length || state !== "idle") return;
+    photos = draft.photos;
+    solvedDraft = draft.solved;
+    solvedFiles = photos.slice();
+    [heightInput, cropInput, densityInput, detailInput, shapeInput].forEach((input, i) => {
+      if (draft.settings[i] !== undefined) input.value = draft.settings[i];
+    });
+    renderPhotos();
+    setProgress("Saved scan restored", 0, "Your photos are ready. Press Build 3D model to continue.");
+  }).catch(() => { /* storage is optional */ });
+  setState("idle");
 }
