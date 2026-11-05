@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { chooseShape, fitBox, fitRevolve, mightBeShape, shapeMesh, SHINY, type SurfaceSample } from "../pages-src/scan-shapes";
+import { dimensionedCylinder, chooseShape, fitBox, fitRevolve, mightBeShape, shapeMesh, SHINY, type SurfaceSample } from "../pages-src/scan-shapes";
 
 type Point = { p: [number, number, number]; n: [number, number, number] };
 
@@ -142,4 +142,18 @@ test("shape meshes are closed and face outward", () => {
   if (box.kind !== "box") return;
   const expectedBox = 4 * box.half[0] * box.half[1] * (box.top - box.bottom);
   assert.ok(Math.abs(volume(shapeMesh(box)) / expectedBox - 1) < 1e-3, `box volume ${volume(shapeMesh(box))} vs ${expectedBox}`);
+});
+
+
+test("assisted cylinder honors measured dimensions and rejects invalid input", () => {
+  const fit = dimensionedCylinder(0.168, 0.066);
+  const mesh = shapeMesh(fit);
+  for (const [axis, expected] of [[0, 0.066], [1, 0.168], [2, 0.066]]) {
+    const values = Array.from(mesh.positions).filter((_, i) => i % 3 === axis);
+    assert.ok(Math.abs(Math.max(...values) - Math.min(...values) - expected) < 1e-7);
+  }
+  for (const invalid of [0, -1, NaN, Infinity]) {
+    assert.throws(() => dimensionedCylinder(invalid, 0.066), RangeError);
+    assert.throws(() => dimensionedCylinder(0.168, invalid), RangeError);
+  }
 });

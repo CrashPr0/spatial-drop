@@ -319,3 +319,12 @@ export function snapToShape(mesh: ScanMesh, fit: ShapeFit, targetTriangles?: num
     stats: { ...mesh.stats, triangles: indices.length / 3, sizeMeters: [max[0] - min[0], max[1] - min[1], max[2] - min[2]], shape: fit.kind },
   };
 }
+
+/** Explicit user-supplied dimensions, not a fitted or measured surface. */
+export function dimensionedCylinder(height: number, diameter: number): RevolveFit {
+  if (!Number.isFinite(height) || !Number.isFinite(diameter) || height <= 0 || diameter <= 0) {
+    throw new RangeError("Enter a positive measured height and diameter.");
+  }
+  return { kind: "revolve", center: [0, 0], bottom: 0, top: height,
+    profile: new Float32Array(2).fill(diameter / 2), inliers: 0, residual: 0, protrusion: 0 };
+}

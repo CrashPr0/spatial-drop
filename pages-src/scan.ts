@@ -1,3 +1,4 @@
+import { poseDisagreement } from "./scan-pose-check";
 import { scanDraft } from "./scan-storage";
 import { BufferAttribute, BufferGeometry, CanvasTexture, LinearFilter, Mesh, MeshStandardMaterial, SRGBColorSpace } from "three";
 import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
@@ -195,6 +196,8 @@ export function setupScanLab() {
   const finishButton = $<HTMLButtonElement>("#scan-finish-button");
   const meshPanel = $("#scan-mesh-panel");
   const heightInput = $<HTMLInputElement>("#scan-height");
+  const diameterInput = $<HTMLInputElement>("#scan-cylinder-diameter");
+  const cylinderField = $("#scan-cylinder-field");
   const cropInput = $<HTMLInputElement>("#scan-crop");
   const densityInput = $<HTMLInputElement>("#scan-density");
   const detailInput = $<HTMLSelectElement>("#scan-detail-level");
@@ -212,7 +215,7 @@ export function setupScanLab() {
   let state: ScanState = "idle";
   let photos: File[] = [];
   type SolvedDraft = { recon: ReturnType<SplatSession["useReconstruction"]>; dimensions: number[][]; names: string[] };
-  type Draft = { version: 1; photos: File[]; solved?: SolvedDraft; settings: string[] };
+  type Draft = { version: 1; photos: File[]; solved?: SolvedDraft; settings: string[]; notes?: (ReturnType<typeof photoNotes.get>)[] };
   let solvedDraft: SolvedDraft | undefined;
   let solvedFiles: File[] = [];
   let draftTimer = 0;
@@ -220,7 +223,8 @@ export function setupScanLab() {
   const samePhotos = () => photos.length === solvedFiles.length && photos.every((p, i) => p === solvedFiles[i]);
   const saveDraft = () => {
     const draft: Draft = { version: 1, photos: photos.slice(), solved: samePhotos() ? solvedDraft : undefined,
-      settings: [heightInput.value, cropInput.value, densityInput.value, detailInput.value, shapeInput.value] };
+      settings: [heightInput.value, cropInput.value, densityInput.value, detailInput.value, shapeInput.value, diameterInput.value],
+      notes: photos.map((file) => photoNotes.get(file)) };
     draftWrites = draftWrites.catch(() => {}).then(() => scanDraft("write", draft)).catch(() => {
       setError("Local scan backup is unavailable. Keep this tab open or download your photos.");
     });
@@ -826,6 +830,10 @@ export function setupScanLab() {
       if (!hasEnoughSolvedViews(placed, scannedPhotos.length)) {
         throw new Error(`Only ${placed} of ${photos.length} photos could be placed. Too many views are missing for a reliable model. Keep the object larger in the frame, move in smaller steps, and keep it stationary. Your photos are still available to download.`);
       }
+      const consistency = poseDisagreement(created.recon.cams.map((c: { R: number[]; imgIdx: number }) => ({
+        R: c.R, note: photoNotes.get(scannedPhotos[c.imgIdx]),
+      })));
+      if (consistency.warning) setError(`Camera rotations disagree with capture sensors by about ${Math.round(consistency.medianDegrees)}° across ${consistency.pairs} checked pairs. The scan may be distorted, or compass readings may have drifted. Inspect the model before using it.`);
       // Save before cropping or training mutates camera intrinsics and points.
       solvedDraft = { recon: structuredClone(created.recon), dimensions: frames.map((f) => [f.fw, f.fh]), names: created.frames.map((f: { name: string }) => f.name) };
       solvedFiles = scannedPhotos.slice();
@@ -942,6 +950,11 @@ export function setupScanLab() {
     setState("meshing");
     setProgress("Building the AR mesh", 98, "Carving a solid surface out of the splat…");
     try {
+      const assisted = shapeInput.value === "cylinder";
+      if (assisted && (!heightInput.checkValidity() || !diameterInput.checkValidity()
+        || !(Number(heightInput.value) > 0) || !(Number(diameterInput.value) > 0))) {
+        throw new Error("Enter valid measured height and diameter before building an assisted cylinder.");
+      }
       const heightCm = Math.min(500, Math.max(1, Number(heightInput.value) || 30));
       const { mesh, atlas, timings } = await runMeshWorker({
         // a copy: the worker's buffers are gone once it finishes, and rebuilds need the splat again
@@ -957,7 +970,8 @@ export function setupScanLab() {
           resolution: 104,
           targetTriangles: DETAIL_TRIANGLES[detailInput.value] ?? DETAIL_TRIANGLES.standard,
         },
-        shapes: shapeInput.value === "scanned" ? "scanned" : "auto",
+        shapes: assisted ? "cylinder" : shapeInput.value === "scanned" ? "scanned" : "auto",
+        cylinderDiameter: assisted ? Number(diameterInput.value) / 100 : undefined,
         textureSize: 1024,
       }, (progress) => {
         if (progress.stage === "shape") setProgress("Building the AR mesh", 98.2, "Checking whether it is a can, a bottle or a box…");
@@ -979,7 +993,7 @@ export function setupScanLab() {
       viewer.setAttribute("ios-src", usdzUrl);
       viewer.setAttribute("src", glbUrl);
       const [w, h, d] = mesh.stats.sizeMeters.map((value) => Math.round(value * 100));
-      meshStats.textContent = `${mesh.stats.triangles.toLocaleString()} triangles · ${w} × ${h} × ${d} cm · GLB ${formatBytes(glbBlob.size)} · USDZ ${formatBytes(usdzBlob.size)}${mesh.stats.groundRemoved ? " · ground removed" : ""}${SHAPE_NOTES[mesh.stats.shape ?? ""] ?? ""}`;
+      meshStats.textContent = `${mesh.stats.triangles.toLocaleString()} triangles · ${w} × ${h} × ${d} cm · GLB ${formatBytes(glbBlob.size)} · USDZ ${formatBytes(usdzBlob.size)}${mesh.stats.groundRemoved ? " · ground removed" : ""}${assisted ? " · assisted cylinder from entered dimensions; photo-textured" : SHAPE_NOTES[mesh.stats.shape ?? ""] ?? ""}`;
       const modelTime = performance.now() - phases.modelStart;
       timingsLine.textContent = phases.trained
         ? `Solved in ${seconds(phases.solved - startedAt)} · ${phases.noGpu ? "no WebGPU, so not trained" : `trained in ${seconds(phases.trained - phases.trainStart)}`} · model in ${seconds(modelTime)} · ${seconds(performance.now() - startedAt)} total on this device`
@@ -1090,6 +1104,8 @@ export function setupScanLab() {
     finishButton.disabled = true;
     void session?.finish().finally(() => { finishButton.disabled = false; });
   });
+  shapeInput.addEventListener("change", () => { cylinderField.hidden = shapeInput.value !== "cylinder"; saveDraft(); });
+  diameterInput.addEventListener("change", saveDraft);
   rebuildButton.addEventListener("click", () => void makeMesh());
   glbButton.addEventListener("click", () => glbBlob && download(glbBlob, "spatial-drop-scan.glb"));
   usdzButton.addEventListener("click", () => usdzBlob && download(usdzBlob, "spatial-drop-scan.usdz"));
@@ -1127,9 +1143,11 @@ export function setupScanLab() {
     photos = draft.photos;
     solvedDraft = draft.solved;
     solvedFiles = photos.slice();
-    [heightInput, cropInput, densityInput, detailInput, shapeInput].forEach((input, i) => {
+    [heightInput, cropInput, densityInput, detailInput, shapeInput, diameterInput].forEach((input, i) => {
       if (draft.settings[i] !== undefined) input.value = draft.settings[i];
     });
+    draft.notes?.forEach((note, i) => { if (note && photos[i]) photoNotes.set(photos[i], note); });
+    cylinderField.hidden = shapeInput.value !== "cylinder";
     renderPhotos();
     setProgress("Saved scan restored", 0, "Your photos are ready. Press Build 3D model to continue.");
   }).catch(() => { /* storage is optional */ });

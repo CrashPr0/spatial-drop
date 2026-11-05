@@ -5,7 +5,7 @@
 /// <reference lib="webworker" />
 
 import { bakeTextureAtlas, buildScanMesh, type MeshOptions, type ScanCamera, type SplatCloud } from "./scan-mesh";
-import { chooseShape, mightBeShape, snapToShape } from "./scan-shapes";
+import { dimensionedCylinder, chooseShape, mightBeShape, snapToShape } from "./scan-shapes";
 import { measureShine } from "./scan-shine";
 import { projectPhotos, type PhotoView } from "./scan-texture";
 
@@ -36,7 +36,8 @@ export interface MeshJob {
   photos: File[];
   options: Omit<MeshOptions, "views">;
   /** "auto": a scan that is a can, a bottle or a box becomes that clean shape */
-  shapes: "auto" | "scanned";
+  shapes: "auto" | "scanned" | "cylinder";
+  cylinderDiameter?: number;
   textureSize: number;
 }
 
@@ -96,7 +97,9 @@ self.onmessage = async ({ data: job }: MessageEvent<MeshJob>) => {
       })),
     });
     const meshed = performance.now();
-    if (job.shapes === "auto") {
+    if (job.shapes === "cylinder") {
+      mesh = snapToShape(mesh, dimensionedCylinder(job.options.heightMeters ?? NaN, job.cylinderDiameter ?? NaN), job.options.targetTriangles);
+    } else if (job.shapes === "auto") {
       // only read the photos for shine when a shape could fit at all
       const sample = { positions: mesh.positions, normals: mesh.normals, bottom: 0 };
       const views = mightBeShape(sample) ? photoViews(job.viewMetas, job.photos, SHINE_PHOTO_MAX) : [];
