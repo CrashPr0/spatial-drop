@@ -118,7 +118,7 @@
               <div id="scan-guide" class="scan-guide" aria-live="polite" hidden><span id="scan-guide-ring" class="scan-guide-ring"></span><span id="scan-guide-text"></span></div>
               <div id="scan-idle" class="scanner-idle"><span>ORBIT CAPTURE</span><strong>Camera is off</strong></div>
             </div>
-            <p class="scan-tip"><b>How to scan:</b> put the object on a textured table in even light and tap Start. The scan walks you through three steps: around the object at its height, around again from above, then a few photos over the top. Follow the arrows, stop when it says hold, and keep still while the small circle fills. The ring in the corner fills as each side is photographed.</p>
+            <p class="scan-tip"><b>How to scan:</b> put the object on a textured table in even light and tap Start. The scan walks you through three steps: around the object at its height, around again from above, then a few photos over the top. Follow the arrows and keep moving slowly: sharp views are picked as you go, and the guide tells you when to slow down. The ring in the corner fills as each side is photographed.</p>
             <p id="scan-capture-hint" class="scan-hint">12 more to start · 30–60 recommended</p>
             <div class="scanner-controls">
               <button id="scan-camera-button" class="primary" type="button"><span>Start capture</span><span>●</span></button>
@@ -130,9 +130,11 @@
               <span class="upload-mark">↗</span>
               <div><strong>Or choose photos or one video</strong><small>JPEG, PNG or HEIC photos · MP4 or MOV orbit clip</small></div>
             </div>
+            <p id="scan-candidate-status" class="scan-detail" role="status">0 kept · 0 checking</p>
             <div id="scan-thumbs" class="scan-thumbs" aria-label="Most recent scan photos"></div>
             <div class="scan-photo-actions">
               <button id="scan-clear-button" class="text-button scan-clear" type="button">Clear photos</button>
+              <button id="scan-add-detail" class="text-button scan-clear" type="button" disabled>Add detail</button>
               <button id="scan-photos-button" class="text-button scan-clear" type="button">Download photos</button>
             </div>
           </article>

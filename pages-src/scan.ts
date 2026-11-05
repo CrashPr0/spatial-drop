@@ -1,3 +1,5 @@
+import { CaptureQueue } from "./scan-queue";
+import { scanWakeLock } from "./scan-wake";
 import { poseDisagreement } from "./scan-pose-check";
 import { scanDraft } from "./scan-storage";
 import { BufferAttribute, BufferGeometry, CanvasTexture, LinearFilter, Mesh, MeshStandardMaterial, SRGBColorSpace } from "three";
@@ -212,6 +214,16 @@ export function setupScanLab() {
   const usdzButton = $<HTMLButtonElement>("#scan-usdz-button");
   const arButton = $<HTMLButtonElement>("#scan-ar-button");
 
+  const updateWake = scanWakeLock();
+  const captureStatus = $("#scan-candidate-status");
+  const addDetailButton = $<HTMLButtonElement>("#scan-add-detail");
+  const buildLabel = buildButton.querySelector("span")!;
+  // adding detail to a built model: the next build replaces it, and it stays on show until then
+  let updatingModel = false;
+  const markUpdating = (updating: boolean) => {
+    updatingModel = updating;
+    buildLabel.textContent = updating ? "Update model" : "Build 3D model";
+  };
   let state: ScanState = "idle";
   let photos: File[] = [];
   type SolvedDraft = { recon: ReturnType<SplatSession["useReconstruction"]>; dimensions: number[][]; names: string[] };
@@ -235,18 +247,21 @@ export function setupScanLab() {
   // Cache descriptors by File identity; removed photos can be garbage collected.
   const preparedFeatures = new WeakMap<File, { fw: number; fh: number; features: object }>();
   let prepareWorker: Worker | null = null;
-  let pendingCandidate: File | null = null;
+  // rejected candidates the gate may still bring back, each with how to keep it
+  const heldPhotos = new Map<string, () => void>();
   let finishPreparation: ((value: boolean | null) => void) | null = null;
   let preparationTimer = 0;
   let weakPairUntil = 0;
   const stopPreparing = () => {
     prepareWorker?.terminate();
     prepareWorker = null;
+    candidateQueue.reset();
     window.clearTimeout(preparationTimer);
     finishPreparation?.(null);
     finishPreparation = null;
   };
-  const preparePhoto = (file: File): Promise<boolean | null> => new Promise((resolve) => {
+  const candidateText = () => `${photos.length} kept · ${candidateQueue.pending} checking${heldPhotos.size ? " · weak link, keep going slowly" : ""}`;
+  const preparePhoto = (file: File, { referenceOnly = false, newChain = false } = {}): Promise<boolean | null> => new Promise((resolve) => {
     try {
       if (!prepareWorker) {
         prepareWorker = new Worker(new URL("./scan-prepare-worker.js", import.meta.url), { type: "module" });
@@ -255,16 +270,26 @@ export function setupScanLab() {
       finishPreparation = resolve;
       prepareWorker.onmessage = ({ data }) => {
         window.clearTimeout(preparationTimer);
-        if (data.features && data.accepted !== false) preparedFeatures.set(file, data);
+        // a held photo can still be kept, so its features are worth having
+        if (data.features) preparedFeatures.set(file, data);
+        for (const name of data.promoted ?? []) heldPhotos.get(name)?.();
+        if (data.accepted) heldPhotos.clear();
+        if (!referenceOnly) weakPairUntil = data.accepted === false || data.forced ? performance.now() + 4000 : 0;
         finishPreparation = null;
         resolve(data.accepted);
       };
       // A failed or slow worker must not strand capture or discard a photo.
       preparationTimer = window.setTimeout(stopPreparing, 15000);
-      prepareWorker.postMessage({ id: 0, file });
+      prepareWorker.postMessage({ id: 0, file, referenceOnly, newChain });
     } catch { stopPreparing(); resolve(null); }
   });
+  const candidateQueue = new CaptureQueue<{ file: File; newChain: boolean }>(({ file, newChain }) => preparePhoto(file, { newChain }), () => {
+    captureStatus.textContent = candidateText();
+    buildButton.disabled = ["building", "training", "meshing"].includes(state) || photos.length < MIN_PHOTOS || candidateQueue.pending > 0;
+    nextStepButton.disabled = candidateQueue.pending > 0;
+  });
   let captureTimer = 0;
+  let finishCapture = () => stopCamera();
   let cameraGeneration = 0;
   let stopSensing = () => {};
   // how the live ring reads, appended to the photo hint while capturing
@@ -305,7 +330,9 @@ export function setupScanLab() {
   function setState(next: ScanState) {
     state = next;
     const busy = next === "building" || next === "training" || next === "meshing";
-    buildButton.disabled = busy || photos.length < MIN_PHOTOS;
+    buildButton.disabled = busy || photos.length < MIN_PHOTOS || candidateQueue.pending > 0;
+    addDetailButton.disabled = busy || state === "capturing" || !photos.length || photos.length >= MAX_PHOTOS;
+    void updateWake(busy || next === "capturing");
     cameraButton.disabled = busy;
     clearButton.disabled = busy || !photos.length;
     photosButton.disabled = !photos.length;
@@ -315,6 +342,7 @@ export function setupScanLab() {
   }
 
   function renderPhotos() {
+    captureStatus.textContent = candidateText();
     window.clearTimeout(draftTimer);
     draftTimer = window.setTimeout(saveDraft, 500);
     photoCount.textContent = `${photos.length}`;
@@ -344,6 +372,7 @@ export function setupScanLab() {
   // ── capture ────────────────────────────────────────────────────────────
   function stopCamera() {
     cameraGeneration++;
+    stopPreparing();
     window.clearInterval(captureTimer);
     captureTimer = 0;
     stream?.getTracks().forEach((track) => track.stop());
@@ -367,15 +396,17 @@ export function setupScanLab() {
     idle.hidden = false;
     cameraButton.hidden = false;
     stopButton.hidden = true;
+    stopButton.disabled = false;
     if (state === "capturing") setState("idle");
   }
 
-  async function startCamera() {
+  async function startCamera(detailMode = false) {
     stopCamera();
     stopPreparing();
     weakPairUntil = 0;
-    pendingCandidate = null;
+    heldPhotos.clear();
     const generation = cameraGeneration;
+    finishCapture = () => stopCamera();
     setError();
     if (photos.length >= MAX_PHOTOS) return setError(`This scan already has ${MAX_PHOTOS} photos. Build or download it before clearing photos to start another scan.`);
     if (!navigator.mediaDevices?.getUserMedia) return setError("This browser cannot open the camera. Choose photos or a video instead.");
@@ -406,6 +437,17 @@ export function setupScanLab() {
     cameraButton.hidden = true;
     stopButton.hidden = false;
     setState("capturing");
+    if (detailMode) markUpdating(!!glbBlob);
+    if (detailMode && photos.length) {
+      captureStatus.textContent = "Preparing reference views from your existing scan…";
+      // spread around the scan: a new view links to the part of it nearby
+      for (const index of new Set([0, 1, 2, 3].map((i) => Math.floor(i * (photos.length - 1) / 3)))) {
+        if (generation !== cameraGeneration) return;
+        await preparePhoto(photos[index], { referenceOnly: true });
+      }
+      if (generation !== cameraGeneration) return;
+      captureStatus.textContent = `${photos.length} kept · 0 checking`;
+    }
 
     // match each frame against the last kept photo: keep one once the view
     // has moved on but still shares enough with it for the solve to link them
@@ -418,10 +460,27 @@ export function setupScanLab() {
     const probeContext = probe.getContext("2d", { willReadFrequently: true })!;
     let lastKept: Float32Array | null = null;
     let lastKeptAt = 0;
+    let queuedAngle: number | null = null;
+    // the next candidate starts a new chain of photos instead of linking to the last step's
+    let chainStart = false;
+    let captureNumber = photos.reduce((max, p) => Math.max(max, Number(p.name.match(/^capture_(\d+)/)?.[1] ?? -1) + 1), photos.length);
     let previousFrame: Float32Array | null = null;
     let heading: Heading = 0;
     const recentSharpness: number[] = [];
     let saving = false;
+    let stopRequested = false;
+    const stopIfFinished = () => {
+      if (!stopRequested || candidateQueue.pending || saving) return false;
+      stopCamera();
+      return true;
+    };
+    finishCapture = () => {
+      if (candidateQueue.pending || saving) {
+        stopRequested = true;
+        stopButton.disabled = true;
+        captureStatus.textContent = "Finishing pending photos…";
+      } else stopCamera();
+    };
     const countdownEnds = performance.now() + COUNTDOWN_SECONDS * 1000;
     countdown.textContent = `${COUNTDOWN_SECONDS}`;
     countdown.hidden = false;
@@ -441,7 +500,12 @@ export function setupScanLab() {
     let pausedUntil = 0;
     const pass = () => PASSES[passIndex];
     const paintSteps = () => {
-      steps.hidden = false;
+      steps.hidden = detailMode;
+      if (detailMode) {
+        stepHow.hidden = false;
+        stepHow.textContent = "Add overlapping views of the weak side. Stop capture, then update the model: it is rebuilt from all the photos.";
+        return;
+      }
       stepItems.forEach((item, i) => {
         const progress = i < passIndex ? 1 : i > passIndex ? 0 : passProgress(PASSES[i], coverageFraction(coverage), passPhotos);
         item.style.setProperty("--progress", `${progress}`);
@@ -476,6 +540,9 @@ export function setupScanLab() {
       }
       passIndex = index;
       passPhotos = 0;
+      queuedAngle = null;
+      heldPhotos.clear();
+      chainStart = !pass().continues;
       coverage = createCoverage();
       if (!pass().continues) lastKept = null;
       heading = 0;
@@ -485,10 +552,10 @@ export function setupScanLab() {
       if (index > 0) banner(`Step ${index + 1} · ${pass().title}`);
     };
     nextStepButton.hidden = false;
-    nextStepButton.onclick = () => enterPass(passIndex + 1);
+    nextStepButton.onclick = () => { if (!candidateQueue.pending && !saving) enterPass(passIndex + 1); };
     const paintRing = () => {
       // over the top there is no loop to fill
-      ring.toggleAttribute("hidden", pass().goal !== "ring");
+      ring.toggleAttribute("hidden", detailMode || pass().goal !== "ring");
       segmentFill(coverage).forEach((fill, i) => {
         ringSegments[i].style.setProperty("--fill", `${Math.min(1, fill)}`);
         ringSegments[i].classList.toggle("done", fill >= SCANNED_FILL);
@@ -504,9 +571,10 @@ export function setupScanLab() {
       const percent = Math.round(coverageFraction(coverage) * 100);
       ringPercent.textContent = `${percent}%`;
       const open = missingSides(coverage);
-      coverageNote = pass().goal !== "ring" ? `Step ${passIndex + 1} · ${passPhotos} of ${pass().count} photos`
+      coverageNote = detailMode ? `Adding detail · ${passPhotos} added` : pass().goal !== "ring" ? `Step ${passIndex + 1} · ${passPhotos} of ${pass().count} photos`
         : coverage.last === null ? `Step ${passIndex + 1}` : open.length ? `Step ${passIndex + 1} · ${percent}% around · still open: ${open.join(", ")}` : `Step ${passIndex + 1} · full circle`;
     };
+    nextStepButton.hidden = detailMode;
     paintSteps();
     paintRing();
     captureTimer = window.setInterval(() => {
@@ -518,7 +586,12 @@ export function setupScanLab() {
         previousFrame = null;
         return;
       }
-      if (saving || !sourceWidth || !sourceHeight || photos.length >= MAX_PHOTOS) return;
+      if (stopRequested) return;
+      if (saving || !sourceWidth || !sourceHeight || photos.length + candidateQueue.pending >= MAX_PHOTOS) return;
+      if (candidateQueue.pending >= candidateQueue.capacity) {
+        showGuide("hold", "Checking recent photos · slow down here");
+        return;
+      }
       const now = performance.now();
       if (now < countdownEnds) {
         countdown.textContent = `${Math.ceil((countdownEnds - now) / 1000)}`;
@@ -540,15 +613,15 @@ export function setupScanLab() {
       const typical = [...recentSharpness].sort((a, b) => a - b)[recentSharpness.length >> 1];
       const small = shrink(gray, probe.width, probe.height, 2);
       const match = lastKept ? matchFrames(lastKept, small.gray, small.width, small.height) : null;
-      const advice = pass().goal === "ring"
-        ? adviseOrbit(match, pose.angle(), coverage.last) : adviseCapture(match);
+      const advice = !detailMode && pass().goal === "ring"
+        ? adviseOrbit(match, pose.angle(), queuedAngle ?? coverage.last) : adviseCapture(match);
       // still: this frame sits within a couple of pixels of the one 120 ms ago
       const jitter = previousFrame ? matchFrames(previousFrame, small.gray, small.width, small.height, { reach: 0.08 }) : null;
       previousFrame = small.gray;
       const steady = !!jitter && jitter.overlap >= 0.6 && Math.hypot(jitter.dx * small.width, jitter.dy * small.height) <= 2 && focus >= 0.7 * typical;
       // photos only count inside the step's tilt band: a loop from above
       // taken at table height would just repeat the first loop
-      const tilt = tiltAdvice(pass(), pose.elevation());
+      const tilt = detailMode ? "ok" : tiltAdvice(pass(), pose.elevation());
       if (tilt === "raise" || tilt === "lower") {
         paintRing();
         ghost.hidden = true;
@@ -563,19 +636,20 @@ export function setupScanLab() {
       // with a real heading from the sensors, point at the nearest open side
       // of the ring instead of just carrying on the way the image shifted
       const here = pose.angle();
-      if (advice === "move" && here !== null && pass().goal === "ring") {
+      if (!detailMode && advice === "move" && here !== null && pass().goal === "ring") {
         const gap = nearestGap(coverage, here, ringDirection);
         // walking to the left raises the ring angle
         if (gap) direction = gap.direction === "cw" ? "left" : "right";
       }
       paintRing();
-      const matched = now < weakPairUntil ? "Weak photo match · move back slightly and take smaller steps"
+      const matched = now < weakPairUntil ? "Weak link · slow down and take smaller steps"
         : match ? `${Math.round(match.overlap * 100)}% matched` : "";
       ghost.hidden = advice !== "lost";
       // someone stuck on "lost" still gets photos: the solve matches wider
       // gaps than this guide does, and one more photo beats a stalled scan
-      const angularGap = pass().goal === "ring" && pose.angle() !== null && coverage.last !== null
-        ? Math.abs(((pose.angle()! - coverage.last + 540) % 360) - 180) : 0;
+      const lastAngle = queuedAngle ?? coverage.last;
+      const angularGap = !detailMode && pass().goal === "ring" && pose.angle() !== null && lastAngle !== null
+        ? Math.abs(((pose.angle()! - lastAngle + 540) % 360) - 180) : 0;
       const stuck = advice === "lost" && angularGap <= 24 && now - lastKeptAt > STUCK_MS;
       if (advice === "move") {
         const wrongWay = heading && match && match.dx * small.width * heading <= -2;
@@ -585,7 +659,7 @@ export function setupScanLab() {
       if (advice === "lost" && !stuck) {
         return showGuide("lost", "Too far · go back until it lines up", 0, direction);
       }
-      const holdText = advice === "first" ? "Hold still for the first photo" : stuck ? "Hold still · keeping one to stay on track" : `Hold still · ${matched}`;
+      const holdText = advice === "first" ? "Move slowly · finding a sharp first view" : stuck ? "Slow down · finding a connected view" : `Move slowly · ${matched}`;
       if (!steady) {
         return showGuide("hold", holdText);
       }
@@ -594,9 +668,9 @@ export function setupScanLab() {
       // the way the view travelled to this photo is the way the orbit goes
       if (match && Math.abs(match.dx * small.width) >= 2) heading = match.dx > 0 ? 1 : -1;
       const before = coverage.last;
-      if (before === null) pose.anchor();
+      if (before === null && queuedAngle === null) pose.anchor();
       const at = pose.angleForKeep(before, match?.dx ?? 0, match?.overlap ?? 1);
-      const note = { step: pass().id, elevation: pose.elevation(), ringAngle: at, overlap: match?.overlap ?? null, at: Date.now() };
+      const note = { step: detailMode ? `detail-${generation}` : pass().id, elevation: pose.elevation(), ringAngle: at, overlap: match?.overlap ?? null, at: Date.now() };
       saving = true;
       const capturedPass = passIndex;
       const frame = document.createElement("canvas");
@@ -609,39 +683,52 @@ export function setupScanLab() {
       viewport.classList.add("flash");
       frame.toBlob(async (blob) => {
         frame.width = frame.height = 0;
-        if (!blob || !stream || generation !== cameraGeneration) { saving = false; return; }
-        const file = new File([blob], `capture_${String(photos.length).padStart(3, "0")}.jpg`, { type: "image/jpeg" });
-        if (capturedPass !== passIndex) { saving = false; return; }
-        showGuide("hold", "Checking this photo · keep the camera near this angle");
-        const accepted = Math.max(sourceWidth, sourceHeight) <= 1920 ? await preparePhoto(file) : null;
-        saving = false;
-        if (!stream || generation !== cameraGeneration || capturedPass !== passIndex) return;
-        if (accepted === false) {
-          pendingCandidate ??= file;
-          weakPairUntil = performance.now() + 4000;
-          lastKeptAt = performance.now();
-          showGuide("lost", "Photo did not link · move back slightly and retry");
+        if (!blob || !stream || generation !== cameraGeneration || capturedPass !== passIndex) {
+          saving = false;
+          if (generation === cameraGeneration) stopIfFinished();
           return;
         }
-        // Replace only the unaccepted candidate. Already accepted coverage stays intact.
-        pendingCandidate = null;
-        weakPairUntil = 0;
-        addPhotoToCoverage(coverage, at, match?.overlap ?? 1);
-        passPhotos++;
-        if (before !== null) {
-          const step = ((at - before + 540) % 360) - 180;
-          if (Math.abs(step) >= 3) ringDirection = step > 0 ? "cw" : "ccw";
-        }
-        paintRing();
+        const file = new File([blob], `capture_${String(captureNumber++).padStart(3, "0")}.jpg`, { type: "image/jpeg" });
+        // Encode briefly, then let the camera keep sampling while a serial
+        // worker validates up to three outstanding candidates.
+        const pending = Math.max(sourceWidth, sourceHeight) <= 1920 ? candidateQueue.enqueue({ file, newChain: chainStart }) : Promise.resolve(null);
+        saving = false;
+        if (!pending) { stopIfFinished(); return; }
+        chainStart = false;
+        // the next view is judged from this one even if it does not link:
+        // that is how the gate finds the stretch after a jump
         lastKept = small.gray;
         lastKeptAt = now;
-
-        if (ghost.src) URL.revokeObjectURL(ghost.src);
-        ghost.src = URL.createObjectURL(blob);
-        photoNotes.set(file, note);
-        addPhoto(file);
-        paintSteps();
-        const completed = passDone(pass(), coverageFraction(coverage), passPhotos, pose.elevation() !== null);
+        queuedAngle = at;
+        const keep = () => {
+          addPhotoToCoverage(coverage, at, match?.overlap ?? 1);
+          passPhotos++;
+          if (before !== null) {
+            const step = ((at - before + 540) % 360) - 180;
+            if (Math.abs(step) >= 3) ringDirection = step > 0 ? "cw" : "ccw";
+          }
+          paintRing();
+          if (ghost.src) URL.revokeObjectURL(ghost.src);
+          ghost.src = URL.createObjectURL(blob);
+          photoNotes.set(file, note);
+          addPhoto(file);
+          paintSteps();
+        };
+        const accepted = await pending;
+        if (!stream || generation !== cameraGeneration) return;
+        if (capturedPass !== passIndex) { stopIfFinished(); return; }
+        if (accepted === false) {
+          heldPhotos.set(file.name, keep);
+          captureStatus.textContent = candidateText();
+          lastKeptAt = performance.now();
+          showGuide("lost", "Weak link · slow down and take smaller steps");
+          stopIfFinished();
+          return;
+        }
+        keep();
+        if (stopIfFinished()) return;
+        const completed = !detailMode && passDone(pass(), coverageFraction(coverage), passPhotos, pose.elevation() !== null);
+        if (completed && candidateQueue.pending) { pausedUntil = performance.now() + 500; return; }
         if (completed && passIndex === PASSES.length - 1) {
           enterPass(passIndex + 1);
           return;
@@ -713,7 +800,7 @@ export function setupScanLab() {
     previousSession?.dispose();
     splat = null;
     subjectRegion = undefined;
-    meshPanel.hidden = true;
+    meshPanel.hidden = !updatingModel;
     liveCanvas.hidden = true;
     setState("building");
     startedAt = performance.now();
@@ -1005,6 +1092,7 @@ export function setupScanLab() {
         ? "Built without GPU training. This recovery model has less geometric detail; your original photos are retained."
         : "Your scan is a local GLB now. Place it in AR, open it in Studio, or download it.");
       window.dispatchEvent(new CustomEvent("spatialdrop:scanready", { detail: glbUrl }));
+      markUpdating(false);
       setState("ready");
     } catch (reason) {
       if (reason instanceof DOMException && reason.name === "AbortError") return;
@@ -1054,7 +1142,7 @@ export function setupScanLab() {
 
   // ── wiring ─────────────────────────────────────────────────────────────
   cameraButton.addEventListener("click", () => void startCamera());
-  stopButton.addEventListener("click", stopCamera);
+  stopButton.addEventListener("click", () => finishCapture());
   dropZone.addEventListener("click", () => fileInput.click());
   dropZone.addEventListener("keydown", (event) => {
     if (event.key === "Enter" || event.key === " ") fileInput.click();
@@ -1097,8 +1185,11 @@ export function setupScanLab() {
   });
   clearButton.addEventListener("click", () => {
     photos = [];
+    heldPhotos.clear();
+    markUpdating(false);
     renderPhotos();
   });
+  addDetailButton.addEventListener("click", () => void startCamera(true));
   buildButton.addEventListener("click", () => void build());
   finishButton.addEventListener("click", () => {
     finishButton.disabled = true;
