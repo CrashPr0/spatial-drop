@@ -121,6 +121,10 @@ export function pointTo(advice: CaptureAdvice, match: FrameMatch | null, heading
 }
 
 
+/** degrees of travel between photos on a loop: 45 photos all the way around */
+const MIN_ORBIT_STEP = 8;
+const SLIPPING_BELOW = 0.35;
+
 /** Sensor heading is supplementary: it must never override lost visual overlap. */
 export function adviseOrbit(match: FrameMatch | null, angle: number | null, last: number | null): CaptureAdvice {
   const visual = adviseCapture(match);
@@ -128,5 +132,9 @@ export function adviseOrbit(match: FrameMatch | null, angle: number | null, last
   const gap = Math.abs(((angle - last + 540) % 360) - 180);
   if (gap > 24) return "lost";
   if (gap >= 10 && visual === "move") return "hold";
+  // close to the object the tiles fall under the keep mark every few degrees,
+  // which spent 120 photos on two loops: hold out for real travel unless the
+  // image says the view is slipping away (a move the heading cannot see)
+  if (gap < MIN_ORBIT_STEP && visual === "hold" && match.overlap >= SLIPPING_BELOW) return "move";
   return visual;
 }

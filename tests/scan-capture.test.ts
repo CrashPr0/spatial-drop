@@ -86,3 +86,13 @@ test("orbit guidance requests small steps and blocks large gaps", () => {
   assert.equal(adviseOrbit(match(0.9), null, 0), "move");
   assert.equal(adviseOrbit(null, 40, 0), "first");
 });
+
+test("with a heading, photos wait for real travel unless the view is slipping away", () => {
+  // close to the object the tiles fall under the keep mark within a few degrees
+  assert.equal(adviseCapture(match(0.5)), "hold");
+  assert.equal(adviseOrbit(match(0.5), 4, 0), "move");
+  assert.equal(adviseOrbit(match(0.5), 9, 0), "hold");
+  // moving sideways without turning: the heading says nothing, the image does
+  assert.equal(adviseOrbit(match(0.2), 4, 0), "hold");
+  assert.equal(adviseOrbit(match(0.05), 4, 0), "lost");
+});

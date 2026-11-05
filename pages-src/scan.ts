@@ -7,7 +7,7 @@ import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
 import { adviseOrbit, adviseCapture, matchFrames, pointTo, shrink, type Arrow, type Heading } from "./scan-capture";
 import { addPhotoToCoverage, coverageFraction, createCoverage, missingSides, nearestGap, PoseTracker, ringPoint, segmentFill, segmentPath, SEGMENTS, SCANNED_FILL, type Orientation } from "./scan-coverage";
 import { cropToSubject } from "./scan-crop";
-import { PASSES, passDone, passProgress, tiltAdvice, hasEnoughSolvedViews } from "./scan-passes";
+import { PASSES, passDone, passProgress, stepCeiling, tiltAdvice, hasEnoughSolvedViews } from "./scan-passes";
 import { pointSplats } from "./scan-points";
 import { subjectCylinder, type ScanCamera, type SubjectRegion, type Vec3 } from "./scan-mesh";
 import { buildUsdz } from "./scan-usdz";
@@ -587,7 +587,7 @@ export function setupScanLab() {
         return;
       }
       if (stopRequested) return;
-      if (saving || !sourceWidth || !sourceHeight || photos.length + candidateQueue.pending >= MAX_PHOTOS) return;
+      if (saving || !sourceWidth || !sourceHeight) return;
       if (candidateQueue.pending >= candidateQueue.capacity) {
         showGuide("hold", "Checking recent photos · slow down here");
         return;
@@ -598,6 +598,11 @@ export function setupScanLab() {
         return;
       }
       if (now < pausedUntil) return;
+      if (photos.length + candidateQueue.pending >= (detailMode ? MAX_PHOTOS : stepCeiling(passIndex, MAX_PHOTOS))) {
+        // this step has had its share: the rest belong to the steps after it
+        if (!detailMode && !candidateQueue.pending && passIndex < PASSES.length - 1) enterPass(passIndex + 1);
+        return;
+      }
       if (!countdown.hidden) {
         countdown.hidden = true;
         countdown.classList.remove("banner");

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { PASSES, passDone, passProgress, RING_DONE, tiltAdvice, hasEnoughSolvedViews } from "../pages-src/scan-passes";
+import { PASSES, passDone, passProgress, RING_DONE, stepCeiling, tiltAdvice, hasEnoughSolvedViews } from "../pages-src/scan-passes";
 
 const [low, high, top] = PASSES;
 
@@ -52,4 +52,13 @@ test("incomplete camera solves are rejected before training", () => {
   assert.equal(hasEnoughSolvedViews(8, 12), false);
   assert.equal(hasEnoughSolvedViews(12, 12), true);
   assert.equal(hasEnoughSolvedViews(0, 0), false);
+});
+
+test("the loops cannot use up the photos of the steps after them", () => {
+  // a real scan spent all 120 on the two loops and never got to go over the top
+  assert.equal(stepCeiling(2, 120), 120);
+  assert.ok(stepCeiling(1, 120) <= 120 - PASSES[2].count!);
+  assert.ok(stepCeiling(0, 120) < stepCeiling(1, 120));
+  // a full loop still fits: 8 degree steps come to 45 photos
+  assert.ok(stepCeiling(0, 120) >= 45 && stepCeiling(1, 120) - stepCeiling(0, 120) >= 45 - 5);
 });

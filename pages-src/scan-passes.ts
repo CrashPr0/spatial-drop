@@ -17,6 +17,8 @@ export interface ScanPass {
   maxElevation: number;
   /** photos kept before the step ends regardless of coverage */
   budget: number;
+  /** photos kept back for this step while the steps before it run */
+  reserve: number;
   /** "ring": done when the loop is covered; "count": done after `count` photos */
   goal: "ring" | "count";
   count?: number;
@@ -31,15 +33,15 @@ export interface ScanPass {
 
 export const PASSES: ScanPass[] = [
   {
-    id: "low", title: "Around", minElevation: -25, maxElevation: 25, budget: 30, goal: "ring",
+    id: "low", title: "Around", minElevation: -25, maxElevation: 25, budget: 30, reserve: 0, goal: "ring",
     how: "Hold the phone level with the middle of the object and walk all the way around it.",
   },
   {
-    id: "high", title: "From above", minElevation: -65, maxElevation: -25, budget: 28, goal: "ring",
+    id: "high", title: "From above", minElevation: -65, maxElevation: -25, budget: 28, reserve: 45, goal: "ring",
     how: "Raise the phone above the object, tilt it down at the object, and walk around it again.",
   },
   {
-    id: "top", title: "Over the top", minElevation: -90, maxElevation: -45, budget: 5, goal: "count", count: 5, continues: true,
+    id: "top", title: "Over the top", minElevation: -90, maxElevation: -45, budget: 5, reserve: 5, goal: "count", count: 5, continues: true,
     how: "From where you are, move the phone up and over the object, tilting it down, and hold still at each stop.",
   },
 ];
@@ -72,6 +74,10 @@ export function passProgress(pass: ScanPass, coverage: number, photos: number) {
 export const passDone = (pass: ScanPass, coverage: number, photos: number, tracked = false) =>
   passProgress(pass, coverage, photos) >= 1 || ((!tracked || pass.goal !== "ring") && photos >= pass.budget);
 
+
+/** How many photos the scan may hold by the end of a step: the rest belong to the steps after it. */
+export const stepCeiling = (index: number, maxPhotos: number) =>
+  maxPhotos - PASSES.slice(index + 1).reduce((sum, pass) => sum + pass.reserve, 0);
 
 /** Conservative acceptance gate; photo count alone does not establish coverage. */
 export const hasEnoughSolvedViews = (placed: number, total: number) =>
