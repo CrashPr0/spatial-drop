@@ -1,3 +1,4 @@
+import { importModel } from "./model-import";
 import "@google/model-viewer";
 import QRCode from "qrcode";
 import { setupBeamLab, stopBeamScanner } from "./beam";
@@ -5,7 +6,6 @@ import { setupEighthWall } from "./eighth-wall";
 import { setupScanLab } from "./scan";
 import "./style.css";
 
-const MAX_BYTES = 15 * 1024 * 1024;
 const dropZone = document.querySelector<HTMLDivElement>("#drop-zone")!;
 const fileInput = document.querySelector<HTMLInputElement>("#file-input")!;
 const modelUrl = document.querySelector<HTMLInputElement>("#model-url")!;
@@ -31,19 +31,23 @@ function setModel(src: string) {
   status.textContent = "MODEL LOADED";
 }
 
+let importId = 0;
 async function acceptFile(file?: File) {
-  setError();
   if (!file) return;
-  if (!file.name.toLowerCase().endsWith(".glb")) return setError("Please choose a binary glTF file ending in .glb.");
-  if (file.size > MAX_BYTES) return setError("That model is over 15 MB. Optimize it, then try again.");
-  const signature = new TextDecoder().decode((await file.slice(0, 4).arrayBuffer()));
-  if (signature !== "glTF") return setError("This file is not a valid binary glTF model.");
-  if (localObjectUrl) URL.revokeObjectURL(localObjectUrl);
-  localObjectUrl = URL.createObjectURL(file);
-  setModel(localObjectUrl);
-  document.querySelector("#drop-title")!.textContent = file.name;
-  document.querySelector("#drop-detail")!.textContent = `${(file.size / 1024 / 1024).toFixed(1)} MB · Local preview`;
-  if (!modelTitle.value) modelTitle.value = file.name.replace(/\.glb$/i, "").replace(/[-_]+/g, " ");
+  const id = ++importId;
+  setError();
+  try {
+    const model = await importModel(file);
+    if (id !== importId) return;
+    if (localObjectUrl) URL.revokeObjectURL(localObjectUrl);
+    localObjectUrl = URL.createObjectURL(model);
+    setModel(localObjectUrl);
+    document.querySelector("#drop-title")!.textContent = file.name;
+    document.querySelector("#drop-detail")!.textContent = `${(model.size / 1024 / 1024).toFixed(1)} MB · Local preview${/\.obj$/i.test(file.name) ? " · OBJ converted; external materials not included" : ""}`;
+    if (!modelTitle.value) modelTitle.value = file.name.replace(/\.(glb|obj)$/i, "").replace(/[-_]+/g, " ");
+  } catch (reason) {
+    if (id === importId) setError(reason instanceof Error ? reason.message : "Could not import this model.");
+  }
 }
 
 dropZone.addEventListener("click", () => fileInput.click());

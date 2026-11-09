@@ -1,3 +1,4 @@
+import { importModel } from "./model-import";
 import QRCode from "qrcode";
 import jsQR from "jsqr";
 import {
@@ -220,7 +221,9 @@ export function setupBeamLab() {
     beamFileTitle.textContent = file.name;
     beamFileDetail.textContent = "Compressing, hashing, and building recovery fragments…";
     try {
-      const prepared = await createBeamTransfer(file);
+      const model = await importModel(file);
+      if (id !== preparationId) return;
+      const prepared = await createBeamTransfer(model);
       if (id !== preparationId) return;
       transfer = prepared;
       sequence = 0;
