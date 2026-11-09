@@ -209,8 +209,10 @@ export function setupBeamLab() {
     beamLoopLabel.textContent = "TURBO";
   }
 
+  let preparationId = 0;
   async function acceptBeamFile(file?: File) {
     if (!file) return;
+    const id = ++preparationId;
     stopBeam();
     stopCimbarSender();
     setMessage(beamError);
@@ -218,7 +220,9 @@ export function setupBeamLab() {
     beamFileTitle.textContent = file.name;
     beamFileDetail.textContent = "Compressing, hashing, and building recovery fragments…";
     try {
-      transfer = await createBeamTransfer(file);
+      const prepared = await createBeamTransfer(file);
+      if (id !== preparationId) return;
+      transfer = prepared;
       sequence = 0;
       updateTransferSummary();
       beamStartButton.disabled = false;
@@ -228,11 +232,17 @@ export function setupBeamLab() {
         await renderCurrentFrame();
       }
     } catch (reason) {
+      if (id !== preparationId) return;
       transfer = null;
       beamFileDetail.textContent = "Could not prepare this model";
       setMessage(beamError, reason instanceof Error ? reason.message : "Could not prepare this model.");
     }
   }
+
+  window.addEventListener("spatialdrop:openinbeam", (event) => {
+    const file = (event as CustomEvent<{ file: File }>).detail?.file;
+    if (file instanceof File) void acceptBeamFile(file);
+  });
 
   beamDropZone.addEventListener("click", () => beamFileInput.click());
   beamDropZone.addEventListener("keydown", (event) => {

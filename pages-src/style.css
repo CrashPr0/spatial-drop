@@ -364,7 +364,7 @@ footer a { color: inherit; text-underline-offset: 3px; }
 @keyframes scanFlash { to { opacity: 0; } }
 .scan-ghost { position: absolute; z-index: 1; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: .45; pointer-events: none; }
 .scan-ghost[hidden], .scan-countdown[hidden], .scan-guide[hidden], .scan-arrow[hidden], .scan-ring[hidden] { display: none; }
-.scan-ring { position: absolute; z-index: 5; top: 10px; right: 10px; width: clamp(76px, 22%, 112px); aspect-ratio: 1; pointer-events: none; filter: drop-shadow(0 2px 6px rgba(0, 0, 0, .5)); }
+.scan-ring { display: block; width: 88px; height: 88px; flex: none; pointer-events: none; }
 .scan-ring-segment { stroke: rgba(255, 255, 255, .35); stroke-width: .6; fill: color-mix(in srgb, var(--sjsu-gold) calc(var(--fill, 0) * 100%), rgba(9, 31, 56, .7)); }
 .scan-ring-segment.done { stroke: var(--sjsu-gold); stroke-width: 1; }
 .scan-ring-marker { fill: white; stroke: var(--spartan-navy); stroke-width: 1.4; }
@@ -452,7 +452,7 @@ footer a { color: inherit; text-underline-offset: 3px; }
   .beam-display-card { grid-template-columns: 1fr; }
   .beam-screen { justify-self: start; }
   .receive-workbench { grid-template-columns: 1fr; }
-  .scan-workbench { grid-template-columns: 1fr; }
+  .scan-workbench { grid-template-columns: minmax(0, 1fr); }
 }
 
 @media (max-width: 580px) {
@@ -503,6 +503,20 @@ footer a { color: inherit; text-underline-offset: 3px; }
 
 .scan-framing { display: none; position: absolute; z-index: 3; left: 30%; top: 17%; width: 40%; height: 60%; border: 2px dashed rgba(255,255,255,.75); border-radius: 20%; pointer-events: none; }
 .camera-active .scan-framing { display: block; }
-.scan-framing span { position: absolute; top: 100%; left: -25%; width: 150%; text-align: center; color: white; background: rgba(9,31,56,.8); font: 11px/1.4 monospace; }
+
 
 #scan-cylinder-field[hidden] { display: none; }
+
+/* Coverage and framing instructions have their own space, outside camera overlays. */
+.scan-coverage-panel { display: flex; align-items: center; gap: 12px; padding: 10px; margin-top: 8px; background: #091f38; border: 1px solid rgba(255,255,255,.25); }
+.scan-coverage-panel[hidden] { display: none; }
+.scan-coverage-copy { min-width: 0; display: grid; gap: 5px; color: white; overflow-wrap: anywhere; }
+.scan-coverage-copy strong { font-size: 14px; line-height: 1.3; }
+.scan-coverage-copy span, .scan-coverage-copy small { font-size: 11px; line-height: 1.4; }
+.scan-coverage-copy small { color: #b6cce0; }
+.scan-ring-segment.target { stroke: #66e6ff; stroke-width: 2.5; }
+.scan-framing-tip { display: none; margin: 6px 0; color: white; font-size: 12px; line-height: 1.4; }
+.scan-viewport.camera-active + .scan-framing-tip { display: block; }
+
+.scan-workbench > * { min-width: 0; }
+.scan-guide { width: max-content; }

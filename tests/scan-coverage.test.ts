@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { addPhotoToCoverage, SCANNED_FILL, coverageFraction, createCoverage, missingSides, nearestGap, PoseTracker, segmentFill, turn, viewDirection, wrap } from "../pages-src/scan-coverage";
+import { addPhotoToCoverage, SCANNED_FILL, coverageFraction, createCoverage, missingSides, nearestGap, guideGap, PoseTracker, segmentFill, turn, viewDirection, wrap } from "../pages-src/scan-coverage";
 
 test("the sensor gives the compass heading and tilt of the back camera", () => {
   // phone upright (beta 90), turned 90° counterclockwise: the back camera faces west
@@ -96,4 +96,30 @@ test("without a sensor the angle is estimated from the image shift", () => {
   // tiles slid right: the camera went right, the angle drops
   assert.ok(pose.angleForKeep(0, 0.1, 0.3) > 300);
   assert.ok(pose.angleForKeep(0, -0.1, 0.3) < 60);
+});
+
+
+test("gap guidance keeps its destination until filled and reports real angular distance", () => {
+  const coverage = createCoverage();
+  coverage.seen.fill(1);
+  for (let i = 15; i < 45; i++) coverage.seen[i] = 0;
+  for (let i = 75; i < 105; i++) coverage.seen[i] = 0;
+  const first = guideGap(coverage, 50, null, "ccw")!;
+  assert.equal(first.segment, 1);
+  assert.equal(first.degrees, 20);
+  const retained = guideGap(coverage, 70, first.segment, "cw")!;
+  assert.equal(retained.segment, 1);
+  assert.equal(retained.degrees, 40);
+  addPhotoToCoverage(coverage, 30, 0);
+  assert.equal(guideGap(coverage, 30, first.segment)?.segment, 3);
+  coverage.seen.fill(1);
+  assert.equal(guideGap(coverage, 30, 3), null);
+});
+
+test("gap distance excludes direction preference penalty across zero", () => {
+  const coverage = createCoverage();
+  coverage.seen.fill(1);
+  for (let i = 0; i < 15; i++) coverage.seen[i] = 0;
+  for (let i = 345; i < 360; i++) coverage.seen[i] = 0;
+  assert.equal(nearestGap(coverage, 350, "ccw")?.degrees, 10);
 });

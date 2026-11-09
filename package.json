@@ -12,7 +12,7 @@
     "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
     "test": "npm run build && node --test tests/rendered-html.test.mjs",
     "test:beam": "node --import tsx --test tests/beam-codec.test.ts",
-    "test:scan": "node --import tsx --test tests/scan-mesh.test.ts tests/scan-usdz.test.ts tests/scan-texture.test.ts tests/scan-crop.test.ts tests/scan-capture.test.ts tests/scan-link.test.ts tests/scan-pose-check.test.ts tests/scan-queue.test.ts tests/scan-wake.test.ts tests/scan-coverage.test.ts tests/scan-points.test.ts tests/scan-passes.test.ts tests/scan-shapes.test.ts",
+    "test:scan": "node --import tsx --test tests/scan-mesh.test.ts tests/scan-usdz.test.ts tests/scan-texture.test.ts tests/scan-crop.test.ts tests/scan-capture.test.ts tests/scan-link.test.ts tests/scan-pose-check.test.ts tests/scan-queue.test.ts tests/scan-wake.test.ts tests/scan-coverage.test.ts tests/scan-points.test.ts tests/scan-passes.test.ts tests/scan-shapes.test.ts tests/scan-thumbnails.test.ts tests/scan-preparation.test.ts tests/scan-save.test.ts",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern pages-dist",
     "db:generate": "drizzle-kit generate"
   },

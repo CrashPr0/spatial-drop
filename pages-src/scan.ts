@@ -1,11 +1,15 @@
+import { BEAM_MAX_BYTES } from "./beam-codec";
+import { PhotoPreparation } from "./scan-preparation";
+import { LatestScanSave } from "./scan-save";
 import { CaptureQueue } from "./scan-queue";
+import { photoThumbnails } from "./scan-thumbnails";
 import { scanWakeLock } from "./scan-wake";
 import { poseDisagreement } from "./scan-pose-check";
 import { scanDraft } from "./scan-storage";
 import { BufferAttribute, BufferGeometry, CanvasTexture, LinearFilter, Mesh, MeshStandardMaterial, SRGBColorSpace } from "three";
 import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
 import { adviseOrbit, adviseCapture, matchFrames, pointTo, shrink, type Arrow, type Heading } from "./scan-capture";
-import { addPhotoToCoverage, coverageFraction, createCoverage, missingSides, nearestGap, PoseTracker, ringPoint, segmentFill, segmentPath, SEGMENTS, SCANNED_FILL, type Orientation } from "./scan-coverage";
+import { addPhotoToCoverage, coverageFraction, createCoverage, missingSides, guideGap, PoseTracker, ringPoint, segmentFill, segmentPath, SEGMENTS, SCANNED_FILL, type Orientation } from "./scan-coverage";
 import { cropToSubject } from "./scan-crop";
 import { PASSES, passDone, passProgress, stepCeiling, tiltAdvice, hasEnoughSolvedViews } from "./scan-passes";
 import { pointSplats } from "./scan-points";
@@ -177,10 +181,14 @@ export function setupScanLab() {
   const ringSegments = Array.from({ length: SEGMENTS }, (_, i) => ring.querySelector<SVGPathElement>(`[data-segment="${i}"]`)!);
   ringSegments.forEach((segment, i) => segment.setAttribute("d", segmentPath(i)));
   const ringMarker = ring.querySelector<SVGCircleElement>(".scan-ring-marker")!;
+  const coveragePanel = $("#scan-coverage-panel");
+  const gapDirection = $("#scan-gap-direction");
+  const gapDistance = $("#scan-gap-distance");
   const ringPercent = ring.querySelector<SVGTextElement>(".scan-ring-percent")!;
   const fileInput = $<HTMLInputElement>("#scan-file-input");
   const dropZone = $("#scan-drop-zone");
   const thumbs = $("#scan-thumbs");
+  const updateThumbnails = photoThumbnails(thumbs);
   const photoCount = $("#scan-photo-count");
   const captureHint = $("#scan-capture-hint");
   const clearButton = $<HTMLButtonElement>("#scan-clear-button");
@@ -208,6 +216,10 @@ export function setupScanLab() {
   const viewer = $<HTMLElement & { src: string }>("#scan-viewer");
   const meshStats = $("#scan-mesh-stats");
   const timingsLine = $("#scan-timings");
+  const beamButton = $<HTMLButtonElement>("#scan-beam-button");
+  const beamNote = $("#scan-beam-note");
+  let beamSource: MeshJob | null = null;
+  let preparingBeam = false;
   const studioButton = $<HTMLButtonElement>("#scan-studio-button");
   const glbButton = $<HTMLButtonElement>("#scan-glb-button");
   const plyButton = $<HTMLButtonElement>("#scan-ply-button");
@@ -231,58 +243,54 @@ export function setupScanLab() {
   let solvedDraft: SolvedDraft | undefined;
   let solvedFiles: File[] = [];
   let draftTimer = 0;
-  let draftWrites: Promise<unknown> = Promise.resolve();
+  const draftWrites = new LatestScanSave<Draft>(draft => scanDraft("write", draft), () => {
+    setError("Local scan backup is unavailable. Keep this tab open or download your photos.");
+  });
   const samePhotos = () => photos.length === solvedFiles.length && photos.every((p, i) => p === solvedFiles[i]);
   const saveDraft = () => {
+    window.clearTimeout(draftTimer);
+    draftTimer = 0;
     const draft: Draft = { version: 1, photos: photos.slice(), solved: samePhotos() ? solvedDraft : undefined,
       settings: [heightInput.value, cropInput.value, densityInput.value, detailInput.value, shapeInput.value, diameterInput.value],
       notes: photos.map((file) => photoNotes.get(file)) };
-    draftWrites = draftWrites.catch(() => {}).then(() => scanDraft("write", draft)).catch(() => {
-      setError("Local scan backup is unavailable. Keep this tab open or download your photos.");
-    });
+    draftWrites.save(draft);
   };
   // how each live photo was taken, saved with "Download photos" so a scan can be rebuilt and studied elsewhere
   const photoNotes = new WeakMap<File, { step: string; elevation: number | null; ringAngle: number; overlap: number | null; at: number }>();
   let stream: MediaStream | null = null;
   // Cache descriptors by File identity; removed photos can be garbage collected.
   const preparedFeatures = new WeakMap<File, { fw: number; fh: number; features: object }>();
-  let prepareWorker: Worker | null = null;
+  const preparation = new PhotoPreparation<
+    { file: File; referenceOnly: boolean; newChain: boolean },
+    { id: number; accepted: boolean | null; forced?: boolean; promoted?: string[]; fw: number; fh: number; features?: object }
+  >(() => new Worker(new URL("./scan-prepare-worker.js", import.meta.url), { type: "module" }));
   // rejected candidates the gate may still bring back, each with how to keep it
   const heldPhotos = new Map<string, () => void>();
-  let finishPreparation: ((value: boolean | null) => void) | null = null;
-  let preparationTimer = 0;
   let weakPairUntil = 0;
+  let preparationGeneration = 0;
   const stopPreparing = () => {
-    prepareWorker?.terminate();
-    prepareWorker = null;
+    preparationGeneration++;
+    preparation.cancel();
     candidateQueue.reset();
-    window.clearTimeout(preparationTimer);
-    finishPreparation?.(null);
-    finishPreparation = null;
+    heldPhotos.clear();
   };
   const candidateText = () => `${photos.length} kept · ${candidateQueue.pending} checking${heldPhotos.size ? " · weak link, keep going slowly" : ""}`;
-  const preparePhoto = (file: File, { referenceOnly = false, newChain = false } = {}): Promise<boolean | null> => new Promise((resolve) => {
-    try {
-      if (!prepareWorker) {
-        prepareWorker = new Worker(new URL("./scan-prepare-worker.js", import.meta.url), { type: "module" });
-        prepareWorker.onerror = stopPreparing;
-      }
-      finishPreparation = resolve;
-      prepareWorker.onmessage = ({ data }) => {
-        window.clearTimeout(preparationTimer);
-        // a held photo can still be kept, so its features are worth having
-        if (data.features) preparedFeatures.set(file, data);
-        for (const name of data.promoted ?? []) heldPhotos.get(name)?.();
-        if (data.accepted) heldPhotos.clear();
-        if (!referenceOnly) weakPairUntil = data.accepted === false || data.forced ? performance.now() + 4000 : 0;
-        finishPreparation = null;
-        resolve(data.accepted);
-      };
-      // A failed or slow worker must not strand capture or discard a photo.
-      preparationTimer = window.setTimeout(stopPreparing, 15000);
-      prepareWorker.postMessage({ id: 0, file, referenceOnly, newChain });
-    } catch { stopPreparing(); resolve(null); }
-  });
+  const preparePhoto = async (file: File, { referenceOnly = false, newChain = false } = {}): Promise<boolean | null> => {
+    const generation = preparationGeneration;
+    const data = await preparation.request({ file, referenceOnly, newChain });
+    if (generation !== preparationGeneration) return null;
+    if (!data) {
+      // Only the active photo becomes unknown. Queued photos still get checked
+      // by a fresh worker, rather than all being accepted unchecked on timeout.
+      heldPhotos.clear();
+      return null;
+    }
+    if (data.features) preparedFeatures.set(file, { fw: data.fw, fh: data.fh, features: data.features });
+    for (const name of data.promoted ?? []) heldPhotos.get(name)?.();
+    if (data.accepted) heldPhotos.clear();
+    if (!referenceOnly) weakPairUntil = data.accepted === false || data.forced ? performance.now() + 4000 : 0;
+    return data.accepted;
+  };
   const candidateQueue = new CaptureQueue<{ file: File; newChain: boolean }>(({ file, newChain }) => preparePhoto(file, { newChain }), () => {
     captureStatus.textContent = candidateText();
     buildButton.disabled = ["building", "training", "meshing"].includes(state) || photos.length < MIN_PHOTOS || candidateQueue.pending > 0;
@@ -338,13 +346,14 @@ export function setupScanLab() {
     photosButton.disabled = !photos.length;
     dropZone.classList.toggle("disabled", busy);
     finishButton.hidden = next !== "training";
-    rebuildButton.disabled = next !== "ready";
+    rebuildButton.disabled = next !== "ready" || preparingBeam;
+    beamButton.disabled = busy || preparingBeam || !glbBlob;
   }
 
   function renderPhotos() {
     captureStatus.textContent = candidateText();
-    window.clearTimeout(draftTimer);
-    draftTimer = window.setTimeout(saveDraft, 500);
+    // Continuous capture must not postpone its backup indefinitely.
+    if (!draftTimer) draftTimer = window.setTimeout(saveDraft, 500);
     photoCount.textContent = `${photos.length}`;
     const needed = Math.max(0, MIN_PHOTOS - photos.length);
     const base = photos.length >= MAX_PHOTOS
@@ -353,13 +362,7 @@ export function setupScanLab() {
         ? `${needed} more to start · 30–60 recommended`
         : photos.length < 30 ? "Enough to try · more angles help" : "Photos collected · coverage checked during reconstruction";
     captureHint.textContent = coverageNote ? `${base} · ${coverageNote}` : base;
-    thumbs.replaceChildren(...photos.slice(-12).map((photo) => {
-      const image = document.createElement("img");
-      image.alt = "";
-      image.src = URL.createObjectURL(photo);
-      image.addEventListener("load", () => URL.revokeObjectURL(image.src), { once: true });
-      return image;
-    }));
+    updateThumbnails(photos);
     setState(state);
   }
 
@@ -383,6 +386,7 @@ export function setupScanLab() {
     guide.hidden = true;
     arrow.hidden = true;
     ring.toggleAttribute("hidden", true);
+    coveragePanel.hidden = true;
     nextStepButton.hidden = true;
     stepHow.hidden = true;
     countdown.classList.remove("banner");
@@ -493,6 +497,8 @@ export function setupScanLab() {
       arrow.hidden = !direction;
       arrow.dataset.direction = direction ?? "";
     };
+    let gapTarget: number | null = null;
+    let activeGap: ReturnType<typeof guideGap> = null;
     let ringDirection: "cw" | "ccw" | undefined;
     // the guided steps: around at the object's height, again from above, over the top
     let passIndex = 0;
@@ -547,6 +553,8 @@ export function setupScanLab() {
       if (!pass().continues) lastKept = null;
       heading = 0;
       ringDirection = undefined;
+      gapTarget = null;
+      activeGap = null;
       paintSteps();
       paintRing();
       if (index > 0) banner(`Step ${index + 1} · ${pass().title}`);
@@ -555,10 +563,22 @@ export function setupScanLab() {
     nextStepButton.onclick = () => { if (!candidateQueue.pending && !saving) enterPass(passIndex + 1); };
     const paintRing = () => {
       // over the top there is no loop to fill
-      ring.toggleAttribute("hidden", detailMode || pass().goal !== "ring");
+      coveragePanel.hidden = detailMode || pass().goal !== "ring";
+      ring.toggleAttribute("hidden", coveragePanel.hidden);
+      const sensed = pose.angle();
+      activeGap = !coveragePanel.hidden && sensed !== null && coverage.last !== null
+        ? guideGap(coverage, sensed, gapTarget, ringDirection) : null;
+      gapTarget = activeGap?.segment ?? null;
+      gapDirection.textContent = activeGap
+        ? activeGap.degrees <= 12 ? "You're at the missing side · move slowly" : `Walk ${activeGap.direction === "cw" ? "left" : "right"} around the object`
+        : coverageFraction(coverage) >= 1 ? "Full circle captured" : "Circle the object slowly";
+      gapDistance.textContent = activeGap
+        ? `About ${Math.round(activeGap.degrees / 5) * 5}° to the outlined section · white dot: you`
+        : sensed === null ? "Estimated coverage · follow the camera's overlap guide" : "White dot: you · outlined section: next view";
       segmentFill(coverage).forEach((fill, i) => {
         ringSegments[i].style.setProperty("--fill", `${Math.min(1, fill)}`);
         ringSegments[i].classList.toggle("done", fill >= SCANNED_FILL);
+        ringSegments[i].classList.toggle("target", i === gapTarget);
       });
       // where the camera is now; without a sensor, where the last photo was
       const at = pose.angle() ?? coverage.last;
@@ -640,13 +660,18 @@ export function setupScanLab() {
       if (pass().goal !== "ring" && advice === "move") direction = "up";
       // with a real heading from the sensors, point at the nearest open side
       // of the ring instead of just carrying on the way the image shifted
+      paintRing();
       const here = pose.angle();
       if (!detailMode && advice === "move" && here !== null && pass().goal === "ring") {
-        const gap = nearestGap(coverage, here, ringDirection);
+        const gap = activeGap;
         // walking to the left raises the ring angle
-        if (gap) direction = gap.direction === "cw" ? "left" : "right";
+        if (gap) {
+          // Inside the arrival zone, continue through the side instead of
+          // reversing the arrow every time the sensor crosses its center.
+          const travel = gap.degrees <= 12 ? ringDirection ?? gap.direction : gap.direction;
+          direction = travel === "cw" ? "left" : "right";
+        }
       }
-      paintRing();
       const matched = now < weakPairUntil ? "Weak link · slow down and take smaller steps"
         : match ? `${Math.round(match.overlap * 100)}% matched` : "";
       ghost.hidden = advice !== "lost";
@@ -659,6 +684,9 @@ export function setupScanLab() {
       if (advice === "move") {
         const wrongWay = heading && match && match.dx * small.width * heading <= -2;
         if (pass().goal !== "ring") return showGuide("move", `Move up and over the top · ${matched}`, 0, direction);
+        if (activeGap) return showGuide("move", activeGap.degrees <= 12
+          ? "Move slowly through the outlined side"
+          : `Walk ${activeGap.direction === "cw" ? "left" : "right"} toward the outlined side`, 0, direction);
         return showGuide("move", wrongWay ? "Other way · you've been here" : heading ? `Keep circling · ${matched}` : "Circle the object either way", 0, direction);
       }
       if (advice === "lost" && !stuck) {
@@ -751,6 +779,8 @@ export function setupScanLab() {
   async function acceptFiles(files: File[]) {
     setError();
     if (!files.length || state === "building" || state === "training" || state === "meshing") return;
+    // Imports and live capture must not mutate the same photo collection.
+    stopCamera();
     const clip = files.find((file) => isVideoFile(file));
     if (clip) {
       setState("building");
@@ -1048,9 +1078,9 @@ export function setupScanLab() {
         throw new Error("Enter valid measured height and diameter before building an assisted cylinder.");
       }
       const heightCm = Math.min(500, Math.max(1, Number(heightInput.value) || 30));
-      const { mesh, atlas, timings } = await runMeshWorker({
+      const meshRequest: MeshJob = {
         // a copy: the worker's buffers are gone once it finishes, and rebuilds need the splat again
-        splat: { data: splat.data.slice(), n: splat.n, dc: splat.dc },
+        splat: { data: splat.data, n: splat.n, dc: splat.dc },
         cameras,
         viewMetas,
         photos: scannedPhotos,
@@ -1065,7 +1095,8 @@ export function setupScanLab() {
         shapes: assisted ? "cylinder" : shapeInput.value === "scanned" ? "scanned" : "auto",
         cylinderDiameter: assisted ? Number(diameterInput.value) / 100 : undefined,
         textureSize: 1024,
-      }, (progress) => {
+      };
+      const { mesh, atlas, timings } = await runMeshWorker({ ...meshRequest, splat: { ...meshRequest.splat, data: meshRequest.splat.data.slice() } }, (progress) => {
         if (progress.stage === "shape") setProgress("Building the AR mesh", 98.2, "Checking whether it is a can, a bottle or a box…");
         if (progress.stage === "texture") {
           const { done, total } = progress;
@@ -1076,6 +1107,8 @@ export function setupScanLab() {
       const exports = await exportModels(mesh, atlas);
       if (meshJob !== job) return;
       glbBlob = exports.glb;
+      beamSource = meshRequest;
+      beamNote.textContent = "QR Beam prepares a smaller copy if needed (128 KB maximum).";
       usdzBlob = exports.usdz;
       if (glbUrl) URL.revokeObjectURL(glbUrl);
       if (usdzUrl) URL.revokeObjectURL(usdzUrl);
@@ -1189,10 +1222,12 @@ export function setupScanLab() {
     }
   });
   clearButton.addEventListener("click", () => {
+    stopCamera();
     photos = [];
     heldPhotos.clear();
     markUpdating(false);
     renderPhotos();
+    saveDraft();
   });
   addDetailButton.addEventListener("click", () => void startCamera(true));
   buildButton.addEventListener("click", () => void build());
@@ -1202,12 +1237,46 @@ export function setupScanLab() {
   });
   shapeInput.addEventListener("change", () => { cylinderField.hidden = shapeInput.value !== "cylinder"; saveDraft(); });
   diameterInput.addEventListener("change", saveDraft);
+  for (const input of [heightInput, cropInput, densityInput, detailInput]) input.addEventListener("change", saveDraft);
   rebuildButton.addEventListener("click", () => void makeMesh());
   glbButton.addEventListener("click", () => glbBlob && download(glbBlob, "spatial-drop-scan.glb"));
   usdzButton.addEventListener("click", () => usdzBlob && download(usdzBlob, "spatial-drop-scan.usdz"));
   plyButton.addEventListener("click", async () => {
     if (!session?.trainer) return;
     download(await session.exportPlyBlob(), "spatial-drop-scan.ply");
+  });
+  beamButton.addEventListener("click", async () => {
+    if (!glbBlob || preparingBeam) return;
+    preparingBeam = true;
+    beamButton.disabled = true;
+    rebuildButton.disabled = true;
+    const source = beamSource;
+    const original = glbBlob;
+    beamNote.textContent = "Preparing your scan for QR Beam…";
+    try {
+      let copy = original;
+      if (copy.size > BEAM_MAX_BYTES && source) {
+        for (const [targetTriangles, textureSize] of [[600, 128], [300, 64]]) {
+          const { mesh, atlas } = await runMeshWorker({ ...source,
+            splat: { ...source.splat, data: source.splat.data.slice() },
+            options: { ...source.options, targetTriangles }, textureSize,
+          }, () => {}, new AbortController().signal);
+          copy = (await exportModels(mesh, atlas)).glb;
+          if (copy.size <= BEAM_MAX_BYTES) break;
+        }
+      }
+      if (copy.size > BEAM_MAX_BYTES) throw new Error("This scan could not fit the 128 KB beam limit. Download its GLB instead.");
+      const compact = copy !== original;
+      const file = new File([copy], compact ? "spatial-drop-scan-compact.glb" : "spatial-drop-scan.glb", { type: "model/gltf-binary" });
+      beamNote.textContent = compact ? `Compact copy ready · ${formatBytes(copy.size)} · reduced geometry and texture detail. Full-quality download retained.` : "Scan ready for QR Beam.";
+      window.dispatchEvent(new CustomEvent("spatialdrop:openinbeam", { detail: { file } }));
+      window.location.hash = "beam";
+    } catch (reason) {
+      beamNote.textContent = reason instanceof Error ? reason.message : "Could not prepare the scan for QR Beam. Try again.";
+    } finally {
+      preparingBeam = false;
+      setState(state);
+    }
   });
   studioButton.addEventListener("click", () => {
     if (!glbUrl) return;
@@ -1232,7 +1301,11 @@ export function setupScanLab() {
   window.addEventListener("spatialdrop:modechange", (event) => {
     if ((event as CustomEvent<string>).detail !== "scan") stopCamera();
   });
-  window.addEventListener("pagehide", () => { stopCamera(); stopPreparing(); });
+  document.addEventListener("visibilitychange", () => {
+    // Start the backup before mobile browsers suspend background timers.
+    if (document.hidden && photos.length) saveDraft();
+  });
+  window.addEventListener("pagehide", () => { stopCamera(); if (photos.length) saveDraft(); });
   // Restore only if the user has not started another scan while storage opens.
   void scanDraft<Draft>("read").then((draft) => {
     if (!draft || draft.version !== 1 || !draft.photos.length || photos.length || state !== "idle") return;

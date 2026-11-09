@@ -102,13 +102,27 @@ export const coverageFraction = (coverage: Coverage) => segmentFill(coverage).re
 export function nearestGap(coverage: Coverage, at: number, prefer?: "cw" | "ccw") {
   const fill = segmentFill(coverage);
   let best: { segment: number; direction: "cw" | "ccw"; degrees: number } | null = null;
+  let bestScore = Infinity;
   for (let i = 0; i < SEGMENTS; i++) {
     if (fill[i] >= SCANNED_FILL) continue;
     const d = turn(at, i * SEGMENT_DEG);
-    const degrees = Math.abs(d) + (prefer && (d >= 0) !== (prefer === "cw") ? 90 : 0);
-    if (!best || degrees < best.degrees) best = { segment: i, direction: d >= 0 ? "cw" : "ccw", degrees };
+    const degrees = Math.abs(d);
+    const score = degrees + (prefer && (d >= 0) !== (prefer === "cw") ? 90 : 0);
+    if (score < bestScore) {
+      bestScore = score;
+      best = { segment: i, direction: d >= 0 ? "cw" : "ccw", degrees };
+    }
   }
   return best;
+}
+
+/** Keep one destination until photographed, instead of switching nearby gaps. */
+export function guideGap(coverage: Coverage, at: number, target: number | null, prefer?: "cw" | "ccw") {
+  if (target !== null && segmentFill(coverage)[target] < SCANNED_FILL) {
+    const delta = turn(at, target * SEGMENT_DEG);
+    return { segment: target, direction: delta >= 0 ? "cw" as const : "ccw" as const, degrees: Math.abs(delta) };
+  }
+  return nearestGap(coverage, at, prefer);
 }
 
 /** Names the open sides in words, as "left, behind", relative to where the scan began. */

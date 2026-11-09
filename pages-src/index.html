@@ -108,17 +108,22 @@
             </ol>
             <p id="scan-step-how" class="scan-step-how" aria-live="polite" hidden></p>
             <div class="scanner-viewport scan-viewport">
-              <div class="scan-framing" aria-hidden="true"><span>Keep the object inside this outline · move closer to fill it</span></div>
+              <div class="scan-framing" aria-hidden="true"></div>
               <video id="scan-video" playsinline muted aria-label="Scan camera preview"></video>
               <img id="scan-ghost" class="scan-ghost" alt="" hidden />
               <div class="scanner-reticle" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
-              <svg id="scan-ring" class="scan-ring" viewBox="0 0 100 100" role="img" aria-label="Scan coverage around the object" hidden><path data-segment="0" class="scan-ring-segment" /><path data-segment="1" class="scan-ring-segment" /><path data-segment="2" class="scan-ring-segment" /><path data-segment="3" class="scan-ring-segment" /><path data-segment="4" class="scan-ring-segment" /><path data-segment="5" class="scan-ring-segment" /><path data-segment="6" class="scan-ring-segment" /><path data-segment="7" class="scan-ring-segment" /><path data-segment="8" class="scan-ring-segment" /><path data-segment="9" class="scan-ring-segment" /><path data-segment="10" class="scan-ring-segment" /><path data-segment="11" class="scan-ring-segment" /><circle class="scan-ring-marker" r="3.6" /><text class="scan-ring-percent" x="50" y="53" text-anchor="middle">0%</text></svg>
+
               <div id="scan-arrow" class="scan-arrow" aria-hidden="true" hidden><i class="left"></i><i class="right"></i><i class="up"></i><i class="down"></i></div>
               <div id="scan-countdown" class="scan-countdown" aria-live="assertive" hidden></div>
               <div id="scan-guide" class="scan-guide" aria-live="polite" hidden><span id="scan-guide-ring" class="scan-guide-ring"></span><span id="scan-guide-text"></span></div>
               <div id="scan-idle" class="scanner-idle"><span>ORBIT CAPTURE</span><strong>Camera is off</strong></div>
             </div>
-            <p class="scan-tip"><b>How to scan:</b> put the object on a textured table in even light and tap Start. The scan walks you through three steps: around the object at its height, around again from above, then a few photos over the top. Follow the arrows and keep moving slowly: sharp views are picked as you go, and the guide tells you when to slow down. The ring in the corner fills as each side is photographed.</p>
+            <p class="scan-framing-tip">Keep the object inside the outline · move closer to fill it</p>
+            <div id="scan-coverage-panel" class="scan-coverage-panel" hidden>
+              <svg id="scan-ring" class="scan-ring" viewBox="0 0 100 100" role="img" aria-label="Scan coverage around the object" hidden><path data-segment="0" class="scan-ring-segment" /><path data-segment="1" class="scan-ring-segment" /><path data-segment="2" class="scan-ring-segment" /><path data-segment="3" class="scan-ring-segment" /><path data-segment="4" class="scan-ring-segment" /><path data-segment="5" class="scan-ring-segment" /><path data-segment="6" class="scan-ring-segment" /><path data-segment="7" class="scan-ring-segment" /><path data-segment="8" class="scan-ring-segment" /><path data-segment="9" class="scan-ring-segment" /><path data-segment="10" class="scan-ring-segment" /><path data-segment="11" class="scan-ring-segment" /><circle class="scan-ring-marker" r="3.6" /><text class="scan-ring-percent" x="50" y="53" text-anchor="middle">0%</text></svg>
+              <div class="scan-coverage-copy"><strong id="scan-gap-direction">Circle the object slowly</strong><span id="scan-gap-distance">White dot: you · outlined section: next view</span><small>Keep the object centered as you walk around it.</small></div>
+            </div>
+            <p class="scan-tip"><b>How to scan:</b> put the object on a textured table in even light and tap Start. The scan walks you through three steps: around the object at its height, around again from above, then a few photos over the top. Follow the arrows and keep moving slowly: sharp views are picked as you go, and the guide tells you when to slow down. The ring below the camera fills as each side is photographed. Follow the outlined section to fill a missed angle.</p>
             <p id="scan-capture-hint" class="scan-hint">12 more to start · 30–60 recommended</p>
             <div class="scanner-controls">
               <button id="scan-camera-button" class="primary" type="button"><span>Start capture</span><span>●</span></button>
@@ -174,11 +179,13 @@
               <button id="scan-rebuild-button" class="text-button" type="button">Rebuild mesh with these settings →</button>
               <div class="actions scan-actions">
                 <button id="scan-ar-button" type="button">Place with 8th Wall</button>
+                <button id="scan-beam-button" type="button" disabled>Send with QR Beam</button>
                 <button id="scan-studio-button" type="button">Open in Studio</button>
                 <button id="scan-glb-button" type="button">Download GLB</button>
                 <button id="scan-usdz-button" type="button">Download USDZ</button>
                 <button id="scan-ply-button" type="button">Download splat</button>
               </div>
+              <p id="scan-beam-note" class="scan-mesh-stats" role="status">QR Beam prepares a smaller copy if needed (128 KB maximum).</p>
               <p id="scan-ar-error" class="error" role="alert" hidden></p>
             </div>
           </article>
