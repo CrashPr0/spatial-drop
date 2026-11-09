@@ -44,7 +44,7 @@ async function acceptFile(file?: File) {
     setModel(localObjectUrl);
     document.querySelector("#drop-title")!.textContent = file.name;
     document.querySelector("#drop-detail")!.textContent = `${(model.size / 1024 / 1024).toFixed(1)} MB · Local preview${/\.obj$/i.test(file.name) ? " · OBJ converted; external materials not included" : ""}`;
-    if (!modelTitle.value) modelTitle.value = file.name.replace(/\.(glb|obj)$/i, "").replace(/[-_]+/g, " ");
+    if (!modelTitle.value) modelTitle.value = file.name.replace(/\.(glb|obj|usdz)$/i, "").replace(/[-_]+/g, " ");
   } catch (reason) {
     if (id === importId) setError(reason instanceof Error ? reason.message : "Could not import this model.");
   }
