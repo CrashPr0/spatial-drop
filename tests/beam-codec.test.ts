@@ -53,3 +53,23 @@ test("Cimbar envelope preserves and verifies the original GLB", async () => {
   assert.deepEqual(Buffer.from(model.bytes), bytes);
   assert.equal(model.hash, transfer.hash);
 });
+
+test('5 MB models use Cimbar without allocating QR fragments and retain integrity checks', async () => {
+  const bytes = new Uint8Array(5 * 1024 * 1024);
+  bytes.set(new TextEncoder().encode('glTF'));
+  const file = new File([bytes], 'large.glb');
+  await assert.rejects(createBeamTransfer(file), /128 KB/);
+  const transfer = await createBeamTransfer(file, 'cimbar');
+  assert.equal(transfer.fragments.length, 0);
+  const wrapped = createCimbarFile(transfer);
+  const result = await verifyCimbarModel(wrapped.name, await wrapped.arrayBuffer());
+  assert.deepEqual(result.bytes, bytes);
+  const damaged = await wrapped.arrayBuffer();
+  new Uint8Array(damaged)[100] = 1;
+  await assert.rejects(verifyCimbarModel(wrapped.name, damaged), /SHA-256/);
+});
+
+test('Cimbar rejects models above 15 MB', async () => {
+  const file = new File([new Uint8Array(15 * 1024 * 1024 + 1)], 'oversized.glb');
+  await assert.rejects(createBeamTransfer(file, 'cimbar'), /15 MB/);
+});

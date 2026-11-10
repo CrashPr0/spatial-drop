@@ -1,3 +1,4 @@
+export const CIMBAR_MAX_BYTES = 15 * 1024 * 1024;
 export const BEAM_MAX_BYTES = 128 * 1024;
 export const BEAM_CHUNK_BYTES = 512;
 export const BEAM_PROTOCOL = "SD2";
@@ -155,13 +156,21 @@ function hasGlbSignature(bytes: Uint8Array) {
   return bytes.length >= 4 && new TextDecoder().decode(bytes.slice(0, 4)) === "glTF";
 }
 
-export async function createBeamTransfer(file: File): Promise<BeamTransfer> {
+export async function createBeamTransfer(file: File, mode: "mono" | "cimbar" = "mono"): Promise<BeamTransfer> {
   if (!file.name.toLowerCase().endsWith(".glb")) throw new Error("QR Beam currently accepts binary .glb models.");
-  if (file.size > BEAM_MAX_BYTES) throw new Error("This model is over the 128 KB optical transfer limit. Optimize it, then try again.");
+  const limit = mode === "cimbar" ? CIMBAR_MAX_BYTES : BEAM_MAX_BYTES;
+  if (file.size > limit) throw new Error(mode === "cimbar" ? "This model exceeds the 15 MB Cimbar limit." : "This model exceeds the 128 KB QR limit. Use Cimbar Fast for larger models.");
   const originalBytes = new Uint8Array(await file.arrayBuffer());
   if (!hasGlbSignature(originalBytes)) throw new Error("This file is not a valid binary glTF model.");
 
   const hash = await sha256Hex(originalBytes);
+  if (mode === "cimbar" && originalBytes.length > BEAM_MAX_BYTES) {
+    // Cimbar supplies its own zstd/fountain coding. Avoid allocating a large
+    // QR equation system that is never sent by this transport.
+    return { id: hash.slice(0, 12), hash, name: file.name, size: originalBytes.length,
+      transportSize: originalBytes.length, compressed: false, messageLength: 0,
+      fragments: [], originalBytes };
+  }
   let body = originalBytes;
   let compressed = false;
   try {
@@ -222,6 +231,7 @@ export function fountainIndexes(id: string, sequence: number, total: number) {
 }
 
 export function createBeamFrame(transfer: BeamTransfer, sequence: number) {
+  if (!transfer.fragments.length) throw new Error("This model requires Cimbar Fast.");
   const payload = new Uint8Array(BEAM_CHUNK_BYTES);
   for (const index of fountainIndexes(transfer.id, sequence, transfer.fragments.length)) {
     const fragment = transfer.fragments[index];
@@ -371,7 +381,7 @@ export async function verifyCimbarModel(name: string, buffer: ArrayBuffer): Prom
   const expectedHash = expectedHashValue.toUpperCase();
   const expectedSize = Number.parseInt(sizeValue, 36);
   const bytes = new Uint8Array(buffer);
-  if (bytes.length !== expectedSize || bytes.length > BEAM_MAX_BYTES) throw new Error("The Cimbar model size does not match its envelope.");
+  if (bytes.length !== expectedSize || bytes.length > CIMBAR_MAX_BYTES) throw new Error("The Cimbar model size does not match its envelope.");
   if (!hasGlbSignature(bytes)) throw new Error("The Cimbar payload is not a valid GLB.");
   if (await sha256Hex(bytes) !== expectedHash) throw new Error("The Cimbar model failed SHA-256 verification.");
   return { bytes, name: originalName.replace(/[\\/]/g, "_").slice(0, 80), hash: expectedHash };

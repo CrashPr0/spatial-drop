@@ -11,6 +11,7 @@ import {
   assembleBeamTransfer,
   createBeamFrame,
   createBeamTransfer,
+  BEAM_MAX_BYTES,
   createCimbarFile,
   createReceiveBuffer,
   parseBeamFrame,
@@ -138,7 +139,7 @@ export function setupBeamLab() {
   function updateTransferSummary() {
     if (!transfer) return;
     if (transport === "cimbar") {
-      beamFileDetail.textContent = `${formatBytes(transfer.size)} · Cimbar Mode ${CIMBAR_MODE}`;
+      beamFileDetail.textContent = `${formatBytes(transfer.size)} · Cimbar Mode ${CIMBAR_MODE}${transfer.size > BEAM_MAX_BYTES ? " · large model: keep both screens open; transfer may take several minutes" : ""}`;
       beamTransferSummary.textContent = `${transfer.name} · ${formatBytes(transfer.size)} · higher-capacity Bm symbols, zstd compression, Reed–Solomon correction, and a ${CIMBAR_FPS} FPS fountain stream (about ${formatBytes(CIMBAR_PAYLOAD_PER_FRAME * CIMBAR_FPS)}/s before camera losses).`;
     } else {
       const ratio = Math.round((transfer.transportSize / transfer.size) * 100);
@@ -149,7 +150,10 @@ export function setupBeamLab() {
   }
 
   function updateTransportUi() {
-    transportInputs.forEach((input) => { input.checked = input.value === transport; });
+    transportInputs.forEach((input) => {
+      input.checked = input.value === transport;
+      input.disabled = input.value === "mono" && !!transfer && transfer.size > BEAM_MAX_BYTES;
+    });
     const isCimbar = transport === "cimbar";
     transportNote.textContent = isCimbar
       ? "Higher-capacity profile: Bm carries about 59% more corrected payload per frame than Bu, with the receiver locked to the same mode."
@@ -162,7 +166,7 @@ export function setupBeamLab() {
   }
 
   async function renderCurrentFrame(scheduleNext = false) {
-    if (!transfer || transport !== "mono") return;
+    if (!transfer || transport !== "mono" || !transfer.fragments.length) return;
     try {
       const value = createBeamFrame(transfer, sequence);
       await QRCode.toCanvas(beamCanvas, value, {
@@ -223,9 +227,12 @@ export function setupBeamLab() {
     try {
       const model = await importModel(file);
       if (id !== preparationId) return;
-      const prepared = await createBeamTransfer(model);
+      const mode = model.size > BEAM_MAX_BYTES ? "cimbar" : transport;
+      const prepared = await createBeamTransfer(model, mode);
       if (id !== preparationId) return;
       transfer = prepared;
+      transport = mode;
+      updateTransportUi();
       sequence = 0;
       updateTransferSummary();
       beamStartButton.disabled = false;
@@ -262,7 +269,7 @@ export function setupBeamLab() {
   transportInputs.forEach((input) => input.addEventListener("change", () => {
     stopBeam();
     stopCimbarSender();
-    transport = input.value === "cimbar" ? "cimbar" : "mono";
+    transport = input.value === "cimbar" || (transfer && transfer.size > BEAM_MAX_BYTES) ? "cimbar" : "mono";
     sequence = 0;
     beamCanvas.hidden = transport === "cimbar";
     beamStartButton.querySelector("span")!.textContent = transport === "cimbar" ? "Start Cimbar Fast" : "Start fountain beam";
